@@ -1,0 +1,63 @@
+[package]
+name = "route_manager"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+readme = "README.md"
+description = "Cross-platform route management interface"
+repository = "https://github.com/rustp2p/route_manager"
+keywords = ["route", "network", "ip"]
+
+[dependencies]
+flume = "0.11"
+libc = "0.2.170"
+tokio = { version = "1", features = [
+    "net",
+    "macros",
+    "io-util",
+    "rt",
+], optional = true }
+async-io = { version = "2.3", optional = true }
+[target.'cfg(target_os = "linux")'.dependencies]
+netlink-packet-route = "0.21.0"
+netlink-sys = "0.8.7"
+netlink-packet-core = "0.7.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_SystemServices",
+    "Win32_Security_Cryptography",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_Threading",
+    "Win32_System_Com",
+    "Win32_System_Rpc",
+    "Win32_Security",
+    "Win32_Foundation",
+    "Win32_System_Ioctl",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_Security_WinTrust",
+] }
+[package.metadata.docs.rs]
+features = ["async","shutdown"]
+rustdoc-args = ["--cfg", "docsrs"]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-freebsd"
+]
+[features]
+default = []
+shutdown = []
+async = ["tokio"]
+async_io = ["async-io"]
+[build-dependencies]
+bindgen = "0.71"
+
+[dev-dependencies]
+tokio = { version = "1.43.0", features = ["full"] }
