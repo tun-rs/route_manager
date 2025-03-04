@@ -16,4 +16,5 @@ pub use unix_bsd::*;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
+#[allow(unused_imports)]
 pub use crate::unix::*;
