@@ -19,7 +19,7 @@ pub(crate) mod async_route;
 pub(crate) mod ffi;
 #[cfg(any(feature = "async", feature = "async_io"))]
 pub use async_route::*;
-pub use ffi::*;
+pub(crate) use ffi::*;
 
 /// RouteListener for receiving route change events.
 pub struct RouteListener {
