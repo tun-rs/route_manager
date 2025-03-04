@@ -17,11 +17,11 @@ pub(crate) fn decode_utf16(string: &[u16]) -> String {
     let end = string.iter().position(|b| *b == 0).unwrap_or(string.len());
     String::from_utf16_lossy(&string[..end])
 }
-pub fn if_name_to_index(name: &str) -> io::Result<u32> {
+pub(crate) fn if_name_to_index(name: &str) -> io::Result<u32> {
     let luid = alias_to_luid(name)?;
     luid_to_index(&luid)
 }
-pub fn if_index_to_name(index: u32) -> io::Result<String> {
+pub(crate) fn if_index_to_name(index: u32) -> io::Result<String> {
     let luid = index_to_luid(index)?;
     luid_to_alias(&luid)
 }

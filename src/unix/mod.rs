@@ -11,7 +11,7 @@ pub use shutdown::*;
 use std::ffi::{CStr, CString};
 use std::io;
 
-pub fn if_name_to_index(name: &str) -> io::Result<u32> {
+pub(crate) fn if_name_to_index(name: &str) -> io::Result<u32> {
     let name = CString::new(name)?;
     let idx = unsafe { libc::if_nametoindex(name.as_ptr()) };
     if idx != 0 {
@@ -20,7 +20,7 @@ pub fn if_name_to_index(name: &str) -> io::Result<u32> {
         Err(io::Error::last_os_error())
     }
 }
-pub fn if_index_to_name(index: u32) -> io::Result<String> {
+pub(crate) fn if_index_to_name(index: u32) -> io::Result<String> {
     let mut ifname: [c_char; 256] = unsafe { std::mem::zeroed() };
 
     unsafe {
