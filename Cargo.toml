@@ -12,7 +12,6 @@ keywords = ["route", "network", "ip"]
 crate-type = ["staticlib", "cdylib", "lib"]
 
 [dependencies]
-flume = "0.11"
 libc = "0.2.170"
 tokio = { version = "1", features = [
     "net",
@@ -21,12 +20,14 @@ tokio = { version = "1", features = [
     "rt",
 ], optional = true }
 async-io = { version = "2.3", optional = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 netlink-packet-route = "0.21.0"
 netlink-sys = "0.8.7"
 netlink-packet-core = "0.7.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+flume = "0.11"
 windows-sys = { version = "0.59", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_SystemServices",
@@ -44,9 +45,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_LibraryLoader",
     "Win32_Security_WinTrust",
 ] }
+
 [package.metadata.docs.rs]
 all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
 targets = [
     "x86_64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
@@ -54,11 +55,13 @@ targets = [
     "x86_64-apple-darwin",
     "x86_64-unknown-freebsd"
 ]
+
 [features]
 default = []
 shutdown = []
 async = ["tokio"]
 async_io = ["async-io"]
+
 [build-dependencies]
 bindgen = "0.71"
 
