@@ -51,41 +51,47 @@ impl Route {
             luid: None,
         }
     }
+    /// Sets the gateway (next hop) for the route.
     pub fn with_gateway(mut self, gateway: IpAddr) -> Self {
         self.gateway = Some(gateway);
         self
     }
+    /// Sets the network interface by name (e.g., "eth0").
     pub fn with_if_name(mut self, if_name: String) -> Self {
         self.if_name = Some(if_name);
         self
     }
+    /// Sets the network interface by index.
     pub fn with_if_index(mut self, if_index: u32) -> Self {
         self.if_index = Some(if_index);
         self
     }
+    /// (Linux only) Sets the routing table ID.
     #[cfg(target_os = "linux")]
     pub fn with_table(mut self, table: u8) -> Self {
         self.table = table;
         self
     }
-
+    /// (Linux only) Sets the source address and prefix for policy-based routing.
     #[cfg(target_os = "linux")]
     pub fn with_source(mut self, source: IpAddr, prefix: u8) -> Self {
         self.source = Some(source);
         self.source_prefix = prefix;
         self
     }
+    /// (Linux only) Sets the preferred source address for the route.
     #[cfg(target_os = "linux")]
     pub fn with_pref_source(mut self, pref_source: IpAddr) -> Self {
         self.pref_source = Some(pref_source);
         self
     }
-
+    /// (Windows/Linux) Sets the route metric (priority).
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub fn with_metric(mut self, metric: u32) -> Self {
         self.metric = Some(metric);
         self
     }
+    /// (Windows only) Sets the LUID (Local Unique Identifier) for the interface.
     #[cfg(target_os = "windows")]
     pub fn with_luid(mut self, luid: u64) -> Self {
         self.luid = Some(luid);
@@ -119,6 +125,7 @@ impl Route {
         }
         Ok(())
     }
+    /// network address
     pub fn network(&self) -> IpAddr {
         Route::network_addr(self.destination, self.prefix)
     }
@@ -140,6 +147,7 @@ impl Route {
             }
         }
     }
+    /// Determine whether the target address is included in the route
     pub fn contains(&self, dest: &IpAddr) -> bool {
         if dest.is_ipv4() != self.destination.is_ipv4() {
             return false;
@@ -148,6 +156,7 @@ impl Route {
         let addr_network = Route::network_addr(*dest, self.prefix);
         route_network == addr_network
     }
+    /// Subnet Mask
     pub fn mask(&self) -> IpAddr {
         match self.destination {
             IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::from(
@@ -195,6 +204,7 @@ impl Ord for Route {
     }
 }
 impl crate::RouteManager {
+    /// Route Lookup by Destination Address
     pub fn find_route(&mut self, dest: &IpAddr) -> io::Result<Option<Route>> {
         let mut list = self.list()?;
         list.sort_by(|v1, v2| v2.cmp(v1));
