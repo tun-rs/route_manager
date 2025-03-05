@@ -205,6 +205,7 @@ impl Ord for Route {
 }
 impl crate::RouteManager {
     /// Route Lookup by Destination Address
+    #[cfg(not(target_os = "windows"))]
     pub fn find_route(&mut self, dest: &IpAddr) -> io::Result<Option<Route>> {
         let mut list = self.list()?;
         list.sort_by(|v1, v2| v2.cmp(v1));

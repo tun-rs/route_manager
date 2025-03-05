@@ -4,16 +4,17 @@ use crate::common::Route;
 use crate::RouteChange;
 use flume::{Receiver, Sender};
 use std::io;
+use std::net::IpAddr;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::raw::HANDLE;
 use std::sync::{Arc, Mutex};
 use windows_sys::Win32::Foundation::{BOOLEAN, ERROR_SUCCESS};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     CancelMibChangeNotify2, CreateIpForwardEntry2, DeleteIpForwardEntry2, FreeMibTable,
-    GetIpForwardTable2, MibAddInstance, MibDeleteInstance, MibParameterNotification,
+    GetBestRoute2, GetIpForwardTable2, MibAddInstance, MibDeleteInstance, MibParameterNotification,
     NotifyRouteChange2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_NOTIFICATION_TYPE,
 };
-use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
+use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_INET};
 #[cfg(any(feature = "async", feature = "async_io"))]
 pub(crate) mod async_route;
 pub(crate) mod ffi;
@@ -132,10 +133,45 @@ impl RouteManager {
         let entries = unsafe { (*ptable).NumEntries };
         let res = (0..entries)
             .map(|idx| unsafe { (*prows)[idx as usize] })
-            .filter_map(|row| unsafe { ffi::row_to_route(&row) })
+            .filter_map(|row| unsafe { row_to_route(&row) })
             .collect::<Vec<_>>();
         unsafe { FreeMibTable(ptable as *mut _ as *mut _) };
         Ok(res)
+    }
+    /// Route Lookup by Destination Address
+    pub fn find_route(&mut self, dest_ip: &IpAddr) -> io::Result<Option<Route>> {
+        unsafe {
+            let mut row: MIB_IPFORWARD_ROW2 = std::mem::zeroed();
+            let mut dest: SOCKADDR_INET = std::mem::zeroed();
+            let mut best_source_address: SOCKADDR_INET = std::mem::zeroed();
+
+            match dest_ip {
+                IpAddr::V4(ipv4) => {
+                    dest.si_family = AF_INET;
+                    dest.Ipv4.sin_family = AF_INET;
+                    dest.Ipv4.sin_addr.S_un.S_addr = u32::from(*ipv4).to_be();
+                }
+                IpAddr::V6(ipv6) => {
+                    dest.si_family = AF_INET6;
+                    dest.Ipv6.sin6_family = AF_INET6;
+                    dest.Ipv6.sin6_addr.u.Byte = ipv6.octets();
+                }
+            }
+
+            let err = GetBestRoute2(
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+                &dest,
+                0,
+                &mut row,
+                &mut best_source_address,
+            );
+            if err != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(err as i32));
+            }
+            Ok(row_to_route(&row))
+        }
     }
     /// Adds a new route.
     pub fn add(&mut self, route: &Route) -> io::Result<()> {
