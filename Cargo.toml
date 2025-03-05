@@ -1,6 +1,6 @@
 [package]
 name = "route_manager"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "Apache-2.0"
 readme = "README.md"
@@ -45,7 +45,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security_WinTrust",
 ] }
 [package.metadata.docs.rs]
-features = ["async","shutdown"]
+all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 targets = [
     "x86_64-unknown-linux-gnu",
