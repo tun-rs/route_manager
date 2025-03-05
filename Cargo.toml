@@ -1,12 +1,15 @@
 [package]
 name = "route_manager"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Apache-2.0"
 readme = "README.md"
 description = "Cross-platform route management interface"
 repository = "https://github.com/rustp2p/route_manager"
 keywords = ["route", "network", "ip"]
+
+[lib]
+crate-type = ["staticlib", "cdylib", "lib"]
 
 [dependencies]
 flume = "0.11"
