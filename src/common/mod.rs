@@ -30,6 +30,47 @@ pub struct Route {
     pub(crate) luid: Option<u64>,
 }
 impl Route {
+    pub fn destination(&self) -> IpAddr {
+        self.destination
+    }
+    pub fn prefix(&self) -> u8 {
+        self.prefix
+    }
+    pub fn gateway(&self) -> Option<IpAddr> {
+        self.gateway
+    }
+    pub fn if_name(&self) -> Option<&String> {
+        self.if_name.as_ref()
+    }
+    pub fn if_index(&self) -> Option<u32> {
+        self.if_index
+    }
+    #[cfg(target_os = "linux")]
+    pub fn table(&self) -> u8 {
+        self.table
+    }
+    #[cfg(target_os = "linux")]
+    pub fn source(&self) -> Option<IpAddr> {
+        self.source
+    }
+    #[cfg(target_os = "linux")]
+    pub fn source_prefix(&self) -> u8 {
+        self.source_prefix
+    }
+    #[cfg(target_os = "linux")]
+    pub fn pref_source(&self) -> Option<IpAddr> {
+        self.pref_source
+    }
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub fn metric(&self) -> Option<u32> {
+        self.metric
+    }
+    #[cfg(target_os = "windows")]
+    pub fn luid(&self) -> Option<u64> {
+        self.luid
+    }
+}
+impl Route {
     pub fn new(destination: IpAddr, prefix: u8) -> Self {
         Self {
             destination,
