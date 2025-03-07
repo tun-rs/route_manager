@@ -1,5 +1,8 @@
 # route_manager
 
+[![Crates.io](https://img.shields.io/crates/v/route_manager.svg)](https://crates.io/crates/route_manager)
+[![route_manager](https://docs.rs/route_manager/badge.svg)](https://docs.rs/route_manager)
+
 Used for adding, deleting, and querying routes,
 with support for asynchronous or synchronous monitoring of route changes.
 
