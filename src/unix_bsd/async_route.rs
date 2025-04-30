@@ -96,7 +96,7 @@ async fn add_or_del_route(route: &Route, rtm_type: u8) -> io::Result<()> {
         .write_with(|s| s.write_all(rtmsg.slice()))
         .await?;
 
-    let mut buf = [0u8; size_of::<m_rtmsg>()];
+    let mut buf = [0u8; std::mem::size_of::<m_rtmsg>()];
     let len = route_socket.read_with(|s| s.read(&mut buf)).await?;
     deserialize_res(|_, _| {}, &buf[..len])?;
 

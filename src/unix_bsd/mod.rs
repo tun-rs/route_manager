@@ -223,7 +223,7 @@ fn add_or_del_route(route: &Route, rtm_type: u8) -> io::Result<()> {
 
     route_fd.write_all(rtmsg.slice())?;
 
-    let mut buf = [0u8; size_of::<m_rtmsg>()];
+    let mut buf = [0u8; std::mem::size_of::<m_rtmsg>()];
 
     let len = route_fd.read(&mut buf)?;
     deserialize_res(|_, _| {}, &buf[..len])?;
@@ -252,13 +252,13 @@ impl TryFrom<&Route> for m_rtmsg {
 
         attr_offset = put_ip_addr(attr_offset, &mut rtmsg, value.mask())?;
 
-        let msg_len = size_of::<rt_msghdr>() + attr_offset;
+        let msg_len = std::mem::size_of::<rt_msghdr>() + attr_offset;
         rtmsg.hdr.rtm_msglen = msg_len as u16;
         Ok(rtmsg)
     }
 }
 fn put_ifa_addr(mut attr_offset: usize, rtmsg: &mut m_rtmsg, if_index: u32) -> io::Result<usize> {
-    let sdl_len = size_of::<sockaddr_dl>();
+    let sdl_len = std::mem::size_of::<sockaddr_dl>();
     let sa_dl = sockaddr_dl {
         sdl_len: sdl_len as u8,
         sdl_family: AF_LINK as u8,
@@ -276,7 +276,7 @@ fn put_ifa_addr(mut attr_offset: usize, rtmsg: &mut m_rtmsg, if_index: u32) -> i
 fn put_ip_addr(mut attr_offset: usize, rtmsg: &mut m_rtmsg, addr: IpAddr) -> io::Result<usize> {
     match addr {
         IpAddr::V4(addr) => {
-            let sa_len = size_of::<sockaddr_in>();
+            let sa_len = std::mem::size_of::<sockaddr_in>();
             let sa_in: sockaddr_in = addr.into();
 
             let sa_ptr = &sa_in as *const sockaddr_in as *const u8;
@@ -286,7 +286,7 @@ fn put_ip_addr(mut attr_offset: usize, rtmsg: &mut m_rtmsg, addr: IpAddr) -> io:
             attr_offset += sa_size(sa_len);
         }
         IpAddr::V6(addr) => {
-            let sa_len = size_of::<sockaddr_in6>();
+            let sa_len = std::mem::size_of::<sockaddr_in6>();
             let sa_in: sockaddr_in6 = addr.into();
 
             let sa_ptr = &sa_in as *const sockaddr_in6 as *const u8;
@@ -306,9 +306,9 @@ fn sa_size(len: usize) -> usize {
 fn sa_size(sa_len: usize) -> usize {
     // See https://github.com/freebsd/freebsd-src/blob/7e51bc6cdd5c317109e25b0b64230d00d68dceb3/contrib/bsnmp/lib/support.h#L89
     if sa_len == 0 {
-        return size_of::<libc::c_long>();
+        return std::mem::size_of::<libc::c_long>();
     }
-    1 + ((sa_len - 1) | (size_of::<libc::c_long>() - 1))
+    1 + ((sa_len - 1) | (std::mem::size_of::<libc::c_long>() - 1))
 }
 fn deserialize_res_change<F: FnMut(RouteChange)>(mut add_fn: F, msgs_buf: &[u8]) -> io::Result<()> {
     deserialize_res(
@@ -326,7 +326,7 @@ fn deserialize_res_change<F: FnMut(RouteChange)>(mut add_fn: F, msgs_buf: &[u8])
 }
 fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::Result<()> {
     let mut offset = 0;
-    while offset + size_of::<rt_msghdr>() <= msgs_buf.len() {
+    while offset + std::mem::size_of::<rt_msghdr>() <= msgs_buf.len() {
         let buf = &msgs_buf[offset..];
 
         let rt_hdr = unsafe { &*buf.as_ptr().cast::<rt_msghdr>() };
@@ -341,7 +341,7 @@ fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::
         if rt_hdr.rtm_flags as u32 & RTF_WASCLONED != 0 {
             continue;
         }
-        let rt_msg = &buf[size_of::<rt_msghdr>()..msg_len];
+        let rt_msg = &buf[std::mem::size_of::<rt_msghdr>()..msg_len];
 
         if let Some(route) = message_to_route(rt_hdr, rt_msg) {
             add_fn(rt_hdr.rtm_type as u32, route);
@@ -372,10 +372,10 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
     {
         if hdr.rtm_addrs & (1 << idx) != 0 {
             let buf = &msg[cur_pos..];
-            if buf.len() < size_of::<sockaddr>() {
+            if buf.len() < std::mem::size_of::<sockaddr>() {
                 continue;
             }
-            assert!(buf.len() >= size_of::<sockaddr>());
+            assert!(buf.len() >= std::mem::size_of::<sockaddr>());
             let sa: &sockaddr = unsafe { &*(buf.as_ptr() as *const sockaddr) };
             assert!(buf.len() >= sa.sa_len as usize);
             *item = Some(sa);
@@ -500,13 +500,13 @@ impl Default for rt_msghdr {
 fn sa_to_ip(sa: &sockaddr) -> Option<IpAddr> {
     match sa.sa_family as u32 {
         AF_INET => {
-            assert!(sa.sa_len as usize >= size_of::<sockaddr_in>());
+            assert!(sa.sa_len as usize >= std::mem::size_of::<sockaddr_in>());
             let inet: &sockaddr_in = unsafe { std::mem::transmute(sa) };
             let octets: [u8; 4] = inet.sin_addr.s_addr.to_ne_bytes();
             Some(IpAddr::from(octets))
         }
         AF_INET6 => {
-            assert!(sa.sa_len as usize >= size_of::<sockaddr_in6>());
+            assert!(sa.sa_len as usize >= std::mem::size_of::<sockaddr_in6>());
             let inet6: &sockaddr_in6 = unsafe { mem::transmute(sa) };
             let octets: [u8; 16] = unsafe { inet6.sin6_addr.__u6_addr.__u6_addr8 };
             Some(IpAddr::from(octets))
@@ -517,7 +517,7 @@ fn sa_to_ip(sa: &sockaddr) -> Option<IpAddr> {
 }
 impl From<Ipv4Addr> for sockaddr_in {
     fn from(ip: Ipv4Addr) -> Self {
-        let sa_len = size_of::<sockaddr_in>();
+        let sa_len = std::mem::size_of::<sockaddr_in>();
         sockaddr_in {
             sin_len: sa_len as u8,
             sin_family: AF_INET as u8,
@@ -531,7 +531,7 @@ impl From<Ipv4Addr> for sockaddr_in {
 }
 impl From<Ipv6Addr> for sockaddr_in6 {
     fn from(ip: Ipv6Addr) -> Self {
-        let sa_len = size_of::<sockaddr_in6>();
+        let sa_len = std::mem::size_of::<sockaddr_in6>();
         sockaddr_in6 {
             sin6_len: sa_len as u8,
             sin6_family: AF_INET6 as u8,
