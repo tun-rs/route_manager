@@ -62,7 +62,6 @@ jobs:
           export CXX=clang++
           cargo fmt --all -- --check
           export CARGO_TERM_COLOR=always
-          rm -rf Cargo.lock
           cargo clippy --all-targets -- -D warnings
 
   semver:
