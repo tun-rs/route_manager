@@ -58,14 +58,12 @@ jobs:
           sudo pkg install -y git protobuf llvm15
           curl --proto 'https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source $HOME/.cargo/env
-          rustup set auto-self-update disable
           export CC=clang
           export CXX=clang++
           cargo fmt --all -- --check
           export CARGO_TERM_COLOR=always
           rm -rf Cargo.lock
           cargo clippy --all-targets -- -D warnings
-          cargo build --release --verbose --target $TARGET
 
   semver:
     name: Check semver
