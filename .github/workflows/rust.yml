@@ -35,6 +35,39 @@ jobs:
     - name: Abort on error
       if: ${{ failure() }}
       run: echo "Some of jobs failed" && false
+    - name: Build x86_64-FreeBSD
+      uses: cross-platform-actions/action@v0.23.0
+      if: startsWith(matrix.os, 'ubuntu')
+      env:
+        TARGET: x86_64-unknown-freebsd
+      with:
+        operating_system: freebsd
+        environment_variables: TARGET
+        architecture: x86-64
+        version: 13.2
+        shell: bash
+        memory: 5G
+        cpu_count: 4
+        run: |
+          uname -a
+          echo $SHELL
+          pwd
+          ls -lah
+          whoami
+          env | sort
+          sudo pkg install -y git protobuf llvm15
+          curl --proto 'https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source $HOME/.cargo/env
+          rustup set auto-self-update disable
+          rustup install 1.77
+          rustup default 1.77
+          export CC=clang
+          export CXX=clang++
+          cargo fmt --all -- --check
+          export CARGO_TERM_COLOR=always
+          rm -rf Cargo.lock
+          cargo clippy --all-targets -- -D warnings
+          cargo build --release --verbose --target $TARGET
 
   semver:
     name: Check semver
