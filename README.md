@@ -14,6 +14,7 @@ with support for asynchronous or synchronous monitoring of route changes.
 | Linux    | ✅ |
 | macOS    | ✅ |
 | FreeBSD  | ✅ |
+| OpenBSD  | ✅ |
 
 ## Features:
 
