@@ -343,11 +343,8 @@ fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::
         if rt_hdr.rtm_flags as u32 & RTF_WASCLONED != 0 {
             continue;
         }
-        let hdr_len = rt_hdr.rtm_hdrlen as usize;
-        if hdr_len > msg_len {
-            continue;
-        }
-        let rt_msg = &buf[hdr_len..msg_len];
+
+        let rt_msg = &buf[std::mem::size_of::<rt_msghdr>()..msg_len];
 
         if let Some(route) = message_to_route(rt_hdr, rt_msg) {
             add_fn(rt_hdr.rtm_type as u32, route);
