@@ -203,7 +203,7 @@ fn add_or_del_route_req(route: &Route, rtm_type: u8) -> io::Result<m_rtmsg> {
     if rtm_type == RTM_ADD as u8 || route.gateway.is_some() {
         rtm_addrs |= RTA_GATEWAY;
     }
-    let mut rtmsg: m_rtmsg = route.try_into()?;
+    let mut rtmsg: m_rtmsg = route_to_m_rtmsg(rtm_type, &route)?;
 
     rtmsg.hdr.rtm_addrs = rtm_addrs as i32;
     rtmsg.hdr.rtm_seq = 1;
@@ -231,36 +231,39 @@ fn add_or_del_route(route: &Route, rtm_type: u8) -> io::Result<()> {
 
     Ok(())
 }
+fn route_to_m_rtmsg(_rtm_type: u8, value: &Route) -> io::Result<m_rtmsg> {
+    value.check()?;
+    let mut rtmsg = m_rtmsg {
+        hdr: rt_msghdr::default(),
+        attrs: [0u8; 512],
+    };
 
-impl TryFrom<&Route> for m_rtmsg {
-    type Error = io::Error;
-    fn try_from(value: &Route) -> Result<Self, Self::Error> {
-        value.check()?;
-        let mut rtmsg = m_rtmsg {
-            hdr: rt_msghdr::default(),
-            attrs: [0u8; 512],
-        };
+    let mut attr_offset = put_ip_addr(0, &mut rtmsg, value.destination)?;
 
-        let mut attr_offset = put_ip_addr(0, &mut rtmsg, value.destination)?;
-
-        if let Some(gateway) = value.gateway {
-            attr_offset = put_ip_addr(attr_offset, &mut rtmsg, gateway)?;
-        }
-        attr_offset = put_ip_addr(attr_offset, &mut rtmsg, value.mask())?;
-
+    if let Some(gateway) = value.gateway {
+        attr_offset = put_ip_addr(attr_offset, &mut rtmsg, gateway)?;
+    }
+    #[cfg(target_os = "openbsd")]
+    if _rtm_type == RTM_ADD as u8 && value.gateway.is_none() {
         if let Some(if_index) = value.get_index() {
             attr_offset = put_ifa_addr(attr_offset, &mut rtmsg, if_index)?;
         }
-
-        let msg_len = std::mem::size_of::<rt_msghdr>() + attr_offset;
-        #[cfg(target_os = "openbsd")]
-        {
-            rtmsg.hdr.rtm_hdrlen = std::mem::size_of::<rt_msghdr>() as u16;
-        }
-        rtmsg.hdr.rtm_msglen = msg_len as u16;
-        Ok(rtmsg)
     }
+    attr_offset = put_ip_addr(attr_offset, &mut rtmsg, value.mask())?;
+
+    if let Some(if_index) = value.get_index() {
+        attr_offset = put_ifa_addr(attr_offset, &mut rtmsg, if_index)?;
+    }
+
+    let msg_len = std::mem::size_of::<rt_msghdr>() + attr_offset;
+    #[cfg(target_os = "openbsd")]
+    {
+        rtmsg.hdr.rtm_hdrlen = std::mem::size_of::<rt_msghdr>() as u16;
+    }
+    rtmsg.hdr.rtm_msglen = msg_len as u16;
+    Ok(rtmsg)
 }
+
 fn put_ifa_addr(mut attr_offset: usize, rtmsg: &mut m_rtmsg, if_index: u32) -> io::Result<usize> {
     let sdl_len = std::mem::size_of::<sockaddr_dl>();
     let sa_dl = sockaddr_dl {
