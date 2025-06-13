@@ -64,9 +64,9 @@ pub use windows::*;
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::*;
-#[cfg(any(target_os = "freebsd", target_os = "macos"))]
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "macos"))]
 mod unix_bsd;
-#[cfg(any(target_os = "freebsd", target_os = "macos"))]
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "macos"))]
 pub use unix_bsd::*;
 #[cfg(unix)]
 mod unix;

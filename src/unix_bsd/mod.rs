@@ -1,4 +1,6 @@
 // See https://github.com/johnyburd/net-route/blob/main/src/platform_impl/macos/macos.rs
+// https://github.com/freebsd/freebsd-src/blob/main/sbin/route/route.c
+// https://github.com/openbsd/src/blob/master/sbin/route/route.c
 
 use crate::{Route, RouteChange};
 use std::collections::VecDeque;
@@ -197,9 +199,11 @@ fn delete_route(route: &Route) -> io::Result<()> {
 fn add_or_del_route_req(route: &Route, rtm_type: u8) -> io::Result<m_rtmsg> {
     let rtm_flags = RTF_STATIC | RTF_UP;
 
-    let rtm_addrs = RTA_DST | RTA_NETMASK | RTA_GATEWAY;
-
-    let mut rtmsg: m_rtmsg = route.try_into()?;
+    let mut rtm_addrs = RTA_DST | RTA_NETMASK;
+    if rtm_type == RTM_ADD as u8 || route.gateway.is_some() {
+        rtm_addrs |= RTA_GATEWAY;
+    }
+    let mut rtmsg: m_rtmsg = route_to_m_rtmsg(rtm_type, route)?;
 
     rtmsg.hdr.rtm_addrs = rtm_addrs as i32;
     rtmsg.hdr.rtm_seq = 1;
@@ -227,33 +231,41 @@ fn add_or_del_route(route: &Route, rtm_type: u8) -> io::Result<()> {
 
     Ok(())
 }
+fn route_to_m_rtmsg(_rtm_type: u8, value: &Route) -> io::Result<m_rtmsg> {
+    value.check()?;
+    let mut rtmsg = m_rtmsg {
+        hdr: rt_msghdr::default(),
+        attrs: [0u8; 512],
+    };
 
-impl TryFrom<&Route> for m_rtmsg {
-    type Error = io::Error;
-    fn try_from(value: &Route) -> Result<Self, Self::Error> {
-        value.check()?;
-        let mut rtmsg = m_rtmsg {
-            hdr: rt_msghdr::default(),
-            attrs: [0u8; 512],
-        };
+    let mut attr_offset = put_ip_addr(0, &mut rtmsg, value.destination)?;
 
-        let mut attr_offset = put_ip_addr(0, &mut rtmsg, value.destination)?;
+    if let Some(gateway) = value.gateway {
+        attr_offset = put_ip_addr(attr_offset, &mut rtmsg, gateway)?;
+    }
 
-        if let Some(gateway) = value.gateway {
-            attr_offset = put_ip_addr(attr_offset, &mut rtmsg, gateway)?;
-        }
-
+    if _rtm_type == RTM_ADD as u8 && value.gateway.is_none() {
         if let Some(if_index) = value.get_index() {
             attr_offset = put_ifa_addr(attr_offset, &mut rtmsg, if_index)?;
         }
-
-        attr_offset = put_ip_addr(attr_offset, &mut rtmsg, value.mask())?;
-
-        let msg_len = std::mem::size_of::<rt_msghdr>() + attr_offset;
-        rtmsg.hdr.rtm_msglen = msg_len as u16;
-        Ok(rtmsg)
     }
+
+    attr_offset = put_ip_addr(attr_offset, &mut rtmsg, value.mask())?;
+    if _rtm_type != RTM_ADD as u8 || value.gateway.is_none() {
+        if let Some(if_index) = value.get_index() {
+            attr_offset = put_ifa_addr(attr_offset, &mut rtmsg, if_index)?;
+        }
+    }
+
+    let msg_len = std::mem::size_of::<rt_msghdr>() + attr_offset;
+    #[cfg(target_os = "openbsd")]
+    {
+        rtmsg.hdr.rtm_hdrlen = std::mem::size_of::<rt_msghdr>() as u16;
+    }
+    rtmsg.hdr.rtm_msglen = msg_len as u16;
+    Ok(rtmsg)
 }
+
 fn put_ifa_addr(mut attr_offset: usize, rtmsg: &mut m_rtmsg, if_index: u32) -> io::Result<usize> {
     let sdl_len = std::mem::size_of::<sockaddr_dl>();
     let sa_dl = sockaddr_dl {
@@ -299,7 +311,7 @@ fn put_ip_addr(mut attr_offset: usize, rtmsg: &mut m_rtmsg, addr: IpAddr) -> io:
 fn sa_size(len: usize) -> usize {
     len
 }
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
 fn sa_size(sa_len: usize) -> usize {
     // See https://github.com/freebsd/freebsd-src/blob/7e51bc6cdd5c317109e25b0b64230d00d68dceb3/contrib/bsnmp/lib/support.h#L89
     if sa_len == 0 {
@@ -327,17 +339,31 @@ fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::
         let buf = &msgs_buf[offset..];
 
         let rt_hdr = unsafe { &*buf.as_ptr().cast::<rt_msghdr>() };
-        assert_eq!(rt_hdr.rtm_version as u32, RTM_VERSION);
+        let msg_len = rt_hdr.rtm_msglen as usize;
+        if msg_len == 0 {
+            break;
+        }
+        offset += msg_len;
+        if rt_hdr.rtm_version as u32 != RTM_VERSION {
+            continue;
+        }
+        #[cfg(target_os = "openbsd")]
+        if (rt_hdr.rtm_flags as u32 & (RTF_GATEWAY | RTF_STATIC | RTF_LLINFO)) == 0 {
+            continue;
+        }
+        #[cfg(target_os = "openbsd")]
+        if (rt_hdr.rtm_flags as u32 & (RTF_LOCAL | RTF_BROADCAST)) != 0 {
+            continue;
+        }
         if rt_hdr.rtm_errno != 0 {
             return Err(io::Error::from_raw_os_error(rt_hdr.rtm_errno));
         }
 
-        let msg_len = rt_hdr.rtm_msglen as usize;
-        offset += msg_len;
         #[cfg(target_os = "macos")]
         if rt_hdr.rtm_flags as u32 & RTF_WASCLONED != 0 {
             continue;
         }
+
         let rt_msg = &buf[std::mem::size_of::<rt_msghdr>()..msg_len];
 
         if let Some(route) = message_to_route(rt_hdr, rt_msg) {
@@ -376,7 +402,7 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
             let sa: &sockaddr = unsafe { &*(buf.as_ptr() as *const sockaddr) };
             assert!(buf.len() >= sa.sa_len as usize);
             *item = Some(sa);
-            #[cfg(target_os = "freebsd")]
+            #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
             {
                 cur_pos += sa_size(sa.sa_len as usize);
             }
