@@ -169,10 +169,7 @@ fn try_get_msg_buf() -> io::Result<Vec<u8>> {
         }
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::Other,
-        "Failed to get routing table",
-    ))
+    Err(io::Error::other("Failed to get routing table"))
 }
 
 fn list_routes() -> io::Result<Vec<Route>> {

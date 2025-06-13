@@ -208,7 +208,7 @@ pub(crate) fn deserialize_res<F: FnMut(RouteChange)>(
             return Ok(false);
         }
         let rx_packet = <NetlinkMessage<RouteNetlinkMessage>>::deserialize(bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e:?}")))?;
+            .map_err(|e| io::Error::other(format!("{e:?}")))?;
         match rx_packet.payload {
             NetlinkPayload::Done(_) => return Ok(true),
             NetlinkPayload::Error(e) => {
