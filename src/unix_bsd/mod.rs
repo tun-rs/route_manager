@@ -1,4 +1,6 @@
 // See https://github.com/johnyburd/net-route/blob/main/src/platform_impl/macos/macos.rs
+// https://github.com/freebsd/freebsd-src/blob/main/sbin/route/route.c
+// https://github.com/openbsd/src/blob/master/sbin/route/route.c
 
 use crate::{Route, RouteChange};
 use std::collections::VecDeque;
@@ -242,14 +244,16 @@ impl TryFrom<&Route> for m_rtmsg {
         if let Some(gateway) = value.gateway {
             attr_offset = put_ip_addr(attr_offset, &mut rtmsg, gateway)?;
         }
+        attr_offset = put_ip_addr(attr_offset, &mut rtmsg, value.mask())?;
 
         if let Some(if_index) = value.get_index() {
             attr_offset = put_ifa_addr(attr_offset, &mut rtmsg, if_index)?;
         }
 
-        attr_offset = put_ip_addr(attr_offset, &mut rtmsg, value.mask())?;
 
         let msg_len = std::mem::size_of::<rt_msghdr>() + attr_offset;
+        #[cfg(target_os = "openbsd")]
+        rtmsg.hdr.rtm_hdrlen = std::mem::size_of::<rt_msghdr>() as u16;
         rtmsg.hdr.rtm_msglen = msg_len as u16;
         Ok(rtmsg)
     }
@@ -333,6 +337,14 @@ fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::
         }
         offset += msg_len;
         if rt_hdr.rtm_version as u32 != RTM_VERSION {
+            continue;
+        }
+        #[cfg(target_os = "openbsd")]
+        if (rt_hdr.rtm_flags & (RTF_GATEWAY | RTF_STATIC | RTF_LLINFO)) == 0 {
+            continue;
+        }
+        #[cfg(target_os = "openbsd")]
+        if (rt_hdr.rtm_flags & (RTF_LOCAL | RTF_BROADCAST)) != 0 {
             continue;
         }
         if rt_hdr.rtm_errno != 0 {
