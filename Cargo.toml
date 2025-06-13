@@ -63,7 +63,7 @@ async = ["tokio"]
 async_io = ["async-io"]
 
 [build-dependencies]
-bindgen = "0.71"
+bindgen = "0.72"
 
 [dev-dependencies]
 tokio = { version = "1.43.0", features = ["full"] }
