@@ -200,7 +200,7 @@ fn add_or_del_route_req(route: &Route, rtm_type: u8) -> io::Result<m_rtmsg> {
     let rtm_flags = RTF_STATIC | RTF_UP;
 
     let mut rtm_addrs = RTA_DST | RTA_NETMASK;
-    if rtm_type == RTM_ADD || route.gateway.is_some() {
+    if rtm_type == RTM_ADD as u8 || route.gateway.is_some() {
         rtm_addrs |= RTA_GATEWAY;
     }
     let mut rtmsg: m_rtmsg = route.try_into()?;
