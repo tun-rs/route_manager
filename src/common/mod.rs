@@ -143,24 +143,24 @@ impl Route {
     pub fn check(&self) -> io::Result<()> {
         if self.destination.is_ipv4() {
             if self.prefix > 32 {
-                return Err(io::Error::new(io::ErrorKind::Other, "prefix error"));
+                return Err(io::Error::other("prefix error"));
             }
         } else if self.prefix > 128 {
-            return Err(io::Error::new(io::ErrorKind::Other, "prefix error"));
+            return Err(io::Error::other("prefix error"));
         }
         if let Some(index) = self.if_index {
             crate::if_index_to_name(index)?;
         }
         if let Some(gateway) = self.gateway {
             if gateway.is_ipv4() != self.destination.is_ipv4() {
-                return Err(io::Error::new(io::ErrorKind::Other, "gateway error"));
+                return Err(io::Error::other("gateway error"));
             }
         }
         if let Some(name) = self.if_name.as_ref() {
             let index = crate::if_name_to_index(name)?;
             if let Some(if_index) = self.if_index {
                 if index != if_index {
-                    return Err(io::Error::new(io::ErrorKind::Other, "if_index mismatch"));
+                    return Err(io::Error::other("if_index mismatch"));
                 }
             }
         }

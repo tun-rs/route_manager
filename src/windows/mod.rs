@@ -59,7 +59,7 @@ impl RouteListener {
     pub fn listen(&mut self) -> io::Result<RouteChange> {
         self.receiver
             .recv()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "shutdown"))
+            .map_err(|_| io::Error::other("shutdown"))
     }
 
     /// Retrieves a shutdown handle for the RouteListener.
