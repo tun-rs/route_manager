@@ -8,7 +8,7 @@ use std::net::IpAddr;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::raw::HANDLE;
 use std::sync::{Arc, Mutex};
-use windows_sys::Win32::Foundation::{BOOLEAN, ERROR_SUCCESS};
+use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     CancelMibChangeNotify2, CreateIpForwardEntry2, DeleteIpForwardEntry2, FreeMibTable,
     GetBestRoute2, GetIpForwardTable2, MibAddInstance, MibDeleteInstance, MibParameterNotification,
@@ -38,7 +38,7 @@ impl RouteListener {
                 AF_UNSPEC,
                 Some(callback),
                 (sender.as_mut() as *mut _) as *mut _,
-                BOOLEAN::from(false),
+                false,
                 &mut handle,
             )
         };
