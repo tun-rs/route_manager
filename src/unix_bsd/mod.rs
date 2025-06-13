@@ -252,7 +252,9 @@ impl TryFrom<&Route> for m_rtmsg {
 
         let msg_len = std::mem::size_of::<rt_msghdr>() + attr_offset;
         #[cfg(target_os = "openbsd")]
-        rtmsg.hdr.rtm_hdrlen = std::mem::size_of::<rt_msghdr>() as u16;
+        {
+            rtmsg.hdr.rtm_hdrlen = std::mem::size_of::<rt_msghdr>() as u16;
+        }
         rtmsg.hdr.rtm_msglen = msg_len as u16;
         Ok(rtmsg)
     }
