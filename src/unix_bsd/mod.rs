@@ -243,16 +243,18 @@ fn route_to_m_rtmsg(_rtm_type: u8, value: &Route) -> io::Result<m_rtmsg> {
     if let Some(gateway) = value.gateway {
         attr_offset = put_ip_addr(attr_offset, &mut rtmsg, gateway)?;
     }
-    #[cfg(target_os = "openbsd")]
+
     if _rtm_type == RTM_ADD as u8 && value.gateway.is_none() {
         if let Some(if_index) = value.get_index() {
             attr_offset = put_ifa_addr(attr_offset, &mut rtmsg, if_index)?;
         }
     }
-    attr_offset = put_ip_addr(attr_offset, &mut rtmsg, value.mask())?;
 
-    if let Some(if_index) = value.get_index() {
-        attr_offset = put_ifa_addr(attr_offset, &mut rtmsg, if_index)?;
+    attr_offset = put_ip_addr(attr_offset, &mut rtmsg, value.mask())?;
+    if _rtm_type != RTM_ADD as u8 || value.gateway.is_none() {
+        if let Some(if_index) = value.get_index() {
+            attr_offset = put_ifa_addr(attr_offset, &mut rtmsg, if_index)?;
+        }
     }
 
     let msg_len = std::mem::size_of::<rt_msghdr>() + attr_offset;
