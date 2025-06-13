@@ -250,7 +250,6 @@ impl TryFrom<&Route> for m_rtmsg {
             attr_offset = put_ifa_addr(attr_offset, &mut rtmsg, if_index)?;
         }
 
-
         let msg_len = std::mem::size_of::<rt_msghdr>() + attr_offset;
         #[cfg(target_os = "openbsd")]
         rtmsg.hdr.rtm_hdrlen = std::mem::size_of::<rt_msghdr>() as u16;
@@ -340,11 +339,11 @@ fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::
             continue;
         }
         #[cfg(target_os = "openbsd")]
-        if (rt_hdr.rtm_flags & (RTF_GATEWAY | RTF_STATIC | RTF_LLINFO)) == 0 {
+        if (rt_hdr.rtm_flags as u32 & (RTF_GATEWAY | RTF_STATIC | RTF_LLINFO)) == 0 {
             continue;
         }
         #[cfg(target_os = "openbsd")]
-        if (rt_hdr.rtm_flags & (RTF_LOCAL | RTF_BROADCAST)) != 0 {
+        if (rt_hdr.rtm_flags as u32 & (RTF_LOCAL | RTF_BROADCAST)) != 0 {
             continue;
         }
         if rt_hdr.rtm_errno != 0 {
