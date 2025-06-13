@@ -3,7 +3,7 @@ fn main() {
     let docs_builder = std::env::var("DOCS_RS").is_ok();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
-    if (target_os == "macos" || target_os == "freebsd") && !docs_builder {
+    if (target_os == "macos" || target_os == "freebsd" || target_os == "openbsd") && !docs_builder {
         build_wrapper();
     }
 }

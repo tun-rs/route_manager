@@ -4,40 +4,7 @@ use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub(crate) struct EventFd(std::fs::File);
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-impl EventFd {
-    pub(crate) fn new() -> io::Result<Self> {
-        #[cfg(not(target_os = "espidf"))]
-        let flags = libc::EFD_CLOEXEC | libc::EFD_NONBLOCK;
-        // ESP-IDF is EFD_NONBLOCK by default and errors if you try to pass this flag.
-        #[cfg(target_os = "espidf")]
-        let flags = 0;
-        let event_fd = unsafe { libc::eventfd(0, flags) };
-        if event_fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        use std::os::fd::FromRawFd;
-        let file = unsafe { std::fs::File::from_raw_fd(event_fd) };
-        Ok(Self(file))
-    }
-    fn wake(&self) -> io::Result<()> {
-        use std::io::Write;
-        let buf: [u8; 8] = 1u64.to_ne_bytes();
-        match (&self.0).write_all(&buf) {
-            Ok(_) => Ok(()),
-            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => Ok(()),
-            Err(err) => Err(err),
-        }
-    }
-    fn as_event_fd(&self) -> libc::c_int {
-        self.0.as_raw_fd() as _
-    }
-}
-#[cfg(target_os = "macos")]
 struct EventFd(libc::c_int, libc::c_int);
-#[cfg(target_os = "macos")]
 impl EventFd {
     fn new() -> io::Result<Self> {
         let mut fds: [libc::c_int; 2] = [0; 2];
@@ -61,7 +28,6 @@ impl EventFd {
         self.0
     }
 }
-#[cfg(target_os = "macos")]
 impl Drop for EventFd {
     fn drop(&mut self) {
         unsafe {

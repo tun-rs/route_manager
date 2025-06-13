@@ -302,7 +302,7 @@ fn put_ip_addr(mut attr_offset: usize, rtmsg: &mut m_rtmsg, addr: IpAddr) -> io:
 fn sa_size(len: usize) -> usize {
     len
 }
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
 fn sa_size(sa_len: usize) -> usize {
     // See https://github.com/freebsd/freebsd-src/blob/7e51bc6cdd5c317109e25b0b64230d00d68dceb3/contrib/bsnmp/lib/support.h#L89
     if sa_len == 0 {
@@ -330,18 +330,27 @@ fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::
         let buf = &msgs_buf[offset..];
 
         let rt_hdr = unsafe { &*buf.as_ptr().cast::<rt_msghdr>() };
-        assert_eq!(rt_hdr.rtm_version as u32, RTM_VERSION);
+        let msg_len = rt_hdr.rtm_msglen as usize;
+        if msg_len == 0 {
+            break;
+        }
+        offset += msg_len;
+        if rt_hdr.rtm_version as u32 != RTM_VERSION {
+            continue;
+        }
         if rt_hdr.rtm_errno != 0 {
             return Err(io::Error::from_raw_os_error(rt_hdr.rtm_errno));
         }
 
-        let msg_len = rt_hdr.rtm_msglen as usize;
-        offset += msg_len;
         #[cfg(target_os = "macos")]
         if rt_hdr.rtm_flags as u32 & RTF_WASCLONED != 0 {
             continue;
         }
-        let rt_msg = &buf[std::mem::size_of::<rt_msghdr>()..msg_len];
+        let hdr_len = rt_hdr.rtm_hdrlen as usize;
+        if hdr_len > msg_len {
+            continue;
+        }
+        let rt_msg = &buf[hdr_len..msg_len];
 
         if let Some(route) = message_to_route(rt_hdr, rt_msg) {
             add_fn(rt_hdr.rtm_type as u32, route);
@@ -379,7 +388,7 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
             let sa: &sockaddr = unsafe { &*(buf.as_ptr() as *const sockaddr) };
             assert!(buf.len() >= sa.sa_len as usize);
             *item = Some(sa);
-            #[cfg(target_os = "freebsd")]
+            #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
             {
                 cur_pos += sa_size(sa.sa_len as usize);
             }
