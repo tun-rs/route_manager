@@ -546,7 +546,6 @@ impl From<Ipv4Addr> for sockaddr_in {
             sin_family: AF_INET as u8,
             sin_port: 0,
             sin_addr: in_addr {
-                #[allow(unnecessary_transmutes)]
                 s_addr: unsafe { mem::transmute::<[u8; 4], u32>(ip.octets()) },
             },
             sin_zero: [0i8; 8],
