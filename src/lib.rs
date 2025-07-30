@@ -74,8 +74,8 @@ mod unix_bsd;
     not(docsrs)
 ))]
 pub use unix_bsd::*;
-#[cfg(unix)]
+#[cfg(all(unix, not(docsrs)))]
 mod unix;
-#[cfg(unix)]
+#[cfg(all(unix, not(docsrs)))]
 #[allow(unused_imports)]
 pub use crate::unix::*;
