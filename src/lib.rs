@@ -66,12 +66,12 @@ mod linux;
 pub use linux::*;
 #[cfg(all(
     any(target_os = "freebsd", target_os = "openbsd", target_os = "macos"),
-    not(doc)
+    not(docsrs)
 ))]
 mod unix_bsd;
 #[cfg(all(
     any(target_os = "freebsd", target_os = "openbsd", target_os = "macos"),
-    not(doc)
+    not(docsrs)
 ))]
 pub use unix_bsd::*;
 #[cfg(unix)]
