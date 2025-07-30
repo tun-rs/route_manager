@@ -11,7 +11,7 @@ pub fn main() {
     println!("find route: {ip} -> {find_route:?}");
     // Need to set up the correct gateway
     let route = Route::new(net, 24).with_if_index(1);
-    println!("route add {:?}", route);
+    println!("route add {route:?}");
     manager.add(&route).unwrap();
     thread::sleep(Duration::from_secs(1));
 

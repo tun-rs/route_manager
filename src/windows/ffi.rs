@@ -68,7 +68,7 @@ pub(crate) unsafe fn row_to_route(row: *const MIB_IPFORWARD_ROW2) -> Option<Rout
         AF_INET6 => IpAddr::from(mem::transmute::<IN6_ADDR, [u8; 16]>(
             (*row).DestinationPrefix.Prefix.Ipv6.sin6_addr,
         )),
-        _ => panic!("Unexpected family {}", dst_family),
+        _ => panic!("Unexpected family {dst_family}"),
     };
 
     let dst_len = (*row).DestinationPrefix.PrefixLength;

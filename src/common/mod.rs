@@ -261,9 +261,9 @@ impl crate::RouteManager {
 impl fmt::Display for RouteChange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RouteChange::Add(route) => write!(f, "Add({})", route),
-            RouteChange::Delete(route) => write!(f, "Delete({})", route),
-            RouteChange::Change(route) => write!(f, "Change({})", route),
+            RouteChange::Add(route) => write!(f, "Add({route})"),
+            RouteChange::Delete(route) => write!(f, "Delete({route})"),
+            RouteChange::Change(route) => write!(f, "Change({route})"),
         }
     }
 }
@@ -276,20 +276,20 @@ impl fmt::Display for Route {
         )?;
 
         match self.gateway {
-            Some(addr) => write!(f, "{}", addr),
+            Some(addr) => write!(f, "{addr}"),
             None => write!(f, "None"),
         }?;
 
         write!(f, ", if_index: ")?;
 
         match self.if_index {
-            Some(index) => write!(f, "{}", index),
+            Some(index) => write!(f, "{index}"),
             None => write!(f, "None"),
         }?;
         write!(f, ", if_name: ")?;
 
         match &self.if_name {
-            Some(if_name) => write!(f, "{}", if_name),
+            Some(if_name) => write!(f, "{if_name}"),
             None => write!(f, "None"),
         }?;
 
@@ -297,7 +297,7 @@ impl fmt::Display for Route {
         {
             write!(f, ", metric: ")?;
             match self.metric {
-                Some(m) => write!(f, "{}", m),
+                Some(m) => write!(f, "{m}"),
                 None => write!(f, "None"),
             }?;
         }
@@ -306,7 +306,7 @@ impl fmt::Display for Route {
         {
             write!(f, ", luid: ")?;
             match self.luid {
-                Some(l) => write!(f, "{}", l),
+                Some(l) => write!(f, "{l}"),
                 None => write!(f, "None"),
             }?;
         }
