@@ -64,18 +64,15 @@ pub use windows::*;
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::*;
-#[cfg(all(
-    any(target_os = "freebsd", target_os = "openbsd", target_os = "macos"),
-    not(docsrs)
-))]
+
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "macos"))]
 mod unix_bsd;
-#[cfg(all(
-    any(target_os = "freebsd", target_os = "openbsd", target_os = "macos"),
-    not(docsrs)
-))]
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "macos"))]
 pub use unix_bsd::*;
-#[cfg(all(unix, not(docsrs)))]
+
+#[cfg(unix)]
 mod unix;
-#[cfg(all(unix, not(docsrs)))]
+
+#[cfg(unix)]
 #[allow(unused_imports)]
 pub use crate::unix::*;
