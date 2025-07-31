@@ -1,11 +1,12 @@
 fn main() {
     // detect docs rs builder so we don't try to link to macos/freebsd libs while cross compiling
+    println!("cargo:rerun-if-env-changed=DOCS_RS");
     let docs_builder = std::env::var("DOCS_RS").is_ok();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
     if (target_os == "macos" || target_os == "freebsd" || target_os == "openbsd") && !docs_builder {
         build_wrapper();
-    } else {
+    } else if docs_builder {
         println!("cargo:rustc-cfg=docsrs");
     }
 }
