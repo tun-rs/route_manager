@@ -5,6 +5,8 @@ fn main() {
 
     if (target_os == "macos" || target_os == "freebsd" || target_os == "openbsd") && !docs_builder {
         build_wrapper();
+    } else {
+        println!("cargo:rustc-cfg=docsrs");
     }
 }
 
