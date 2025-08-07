@@ -261,6 +261,12 @@ fn route_to_m_rtmsg(_rtm_type: u8, value: &Route) -> io::Result<m_rtmsg> {
     }
 
     attr_offset = put_ip_addr(attr_offset, &mut rtmsg, value.mask())?;
+
+    #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    if let Some(source_addr) = value.source {
+        attr_offset = put_ip_addr(attr_offset, &mut rtmsg, source_addr)?;
+    }
+
     if _rtm_type != RTM_ADD as u8 || value.gateway.is_none() {
         if let Some(if_index) = value.get_index() {
             attr_offset = put_ifa_addr(attr_offset, &mut rtmsg, if_index)?;

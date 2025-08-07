@@ -18,7 +18,12 @@ pub struct Route {
     pub(crate) if_index: Option<u32>,
     #[cfg(target_os = "linux")]
     pub(crate) table: u8,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
     pub(crate) source: Option<IpAddr>,
     #[cfg(target_os = "linux")]
     pub(crate) source_prefix: u8,
@@ -49,7 +54,12 @@ impl Route {
     pub fn table(&self) -> u8 {
         self.table
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
     pub fn source(&self) -> Option<IpAddr> {
         self.source
     }
@@ -80,7 +90,12 @@ impl Route {
             if_index: None,
             #[cfg(target_os = "linux")]
             table: 0,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            ))]
             source: None,
             #[cfg(target_os = "linux")]
             source_prefix: 0,
@@ -113,8 +128,13 @@ impl Route {
         self.table = table;
         self
     }
-    /// (Linux only) Sets the source address and prefix for policy-based routing.
-    #[cfg(target_os = "linux")]
+    /// Sets the source address and prefix for policy-based routing.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
     pub fn with_source(mut self, source: IpAddr, prefix: u8) -> Self {
         self.source = Some(source);
         self.source_prefix = prefix;
