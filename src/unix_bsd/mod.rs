@@ -213,6 +213,10 @@ fn add_or_del_route_req(route: &Route, rtm_type: u8) -> io::Result<m_rtmsg> {
     if rtm_type == RTM_ADD as u8 || route.gateway.is_some() {
         rtm_addrs |= RTA_GATEWAY;
     }
+    #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    if route.pref_source.is_some() {
+        rtm_addrs |= RTA_IFA;
+    }
     let mut rtmsg: m_rtmsg = route_to_m_rtmsg(rtm_type, route)?;
 
     rtmsg.hdr.rtm_addrs = rtm_addrs as i32;
