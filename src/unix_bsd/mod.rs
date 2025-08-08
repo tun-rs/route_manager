@@ -263,7 +263,7 @@ fn route_to_m_rtmsg(_rtm_type: u8, value: &Route) -> io::Result<m_rtmsg> {
     attr_offset = put_ip_addr(attr_offset, &mut rtmsg, value.mask())?;
 
     #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
-    if let Some(source_addr) = value.source {
+    if let Some(source_addr) = value.pref_source {
         attr_offset = put_ip_addr(attr_offset, &mut rtmsg, source_addr)?;
     }
 
@@ -491,11 +491,21 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
             },
         }
     }
+    #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    let mut pref_source = None;
+    #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    if hdr.rtm_addrs & (1 << RTAX_IFA) != 0 {
+        if let Some(ifa_sa) = route_addresses[RTAX_IFA as usize] {
+            pref_source = sa_to_ip(ifa_sa);
+        }
+    }
 
     Some(Route {
         destination,
         prefix,
         gateway,
+        #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+        pref_source,
         if_name: if_index_to_name(hdr.rtm_index as u32).ok(),
         if_index: Some(hdr.rtm_index as u32),
     })

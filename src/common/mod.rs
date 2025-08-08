@@ -18,16 +18,16 @@ pub struct Route {
     pub(crate) if_index: Option<u32>,
     #[cfg(target_os = "linux")]
     pub(crate) table: u8,
+    #[cfg(target_os = "linux")]
+    pub(crate) source: Option<IpAddr>,
+    #[cfg(target_os = "linux")]
+    pub(crate) source_prefix: u8,
     #[cfg(any(
         target_os = "linux",
         target_os = "freebsd",
         target_os = "openbsd",
         target_os = "netbsd"
     ))]
-    pub(crate) source: Option<IpAddr>,
-    #[cfg(target_os = "linux")]
-    pub(crate) source_prefix: u8,
-    #[cfg(target_os = "linux")]
     pub(crate) pref_source: Option<IpAddr>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) metric: Option<u32>,
@@ -54,12 +54,7 @@ impl Route {
     pub fn table(&self) -> u8 {
         self.table
     }
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    ))]
+    #[cfg(target_os = "linux")]
     pub fn source(&self) -> Option<IpAddr> {
         self.source
     }
@@ -67,7 +62,12 @@ impl Route {
     pub fn source_prefix(&self) -> u8 {
         self.source_prefix
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
     pub fn pref_source(&self) -> Option<IpAddr> {
         self.pref_source
     }
@@ -90,16 +90,16 @@ impl Route {
             if_index: None,
             #[cfg(target_os = "linux")]
             table: 0,
+            #[cfg(target_os = "linux")]
+            source: None,
+            #[cfg(target_os = "linux")]
+            source_prefix: 0,
             #[cfg(any(
                 target_os = "linux",
                 target_os = "freebsd",
                 target_os = "openbsd",
                 target_os = "netbsd"
             ))]
-            source: None,
-            #[cfg(target_os = "linux")]
-            source_prefix: 0,
-            #[cfg(target_os = "linux")]
             pref_source: None,
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             metric: None,
@@ -128,20 +128,21 @@ impl Route {
         self.table = table;
         self
     }
-    /// Sets the source address and prefix for policy-based routing.
+
+    /// (Linux only) Sets the source address and prefix for policy-based routing.
+    #[cfg(target_os = "linux")]
+    pub fn with_source(mut self, source: IpAddr, prefix: u8) -> Self {
+        self.source = Some(source);
+        self.source_prefix = prefix;
+        self
+    }
+    /// Sets the preferred source address for the route.
     #[cfg(any(
         target_os = "linux",
         target_os = "freebsd",
         target_os = "openbsd",
         target_os = "netbsd"
     ))]
-    pub fn with_source(mut self, source: IpAddr, prefix: u8) -> Self {
-        self.source = Some(source);
-        self.source_prefix = prefix;
-        self
-    }
-    /// (Linux only) Sets the preferred source address for the route.
-    #[cfg(target_os = "linux")]
     pub fn with_pref_source(mut self, pref_source: IpAddr) -> Self {
         self.pref_source = Some(pref_source);
         self
@@ -306,6 +307,7 @@ impl fmt::Display for Route {
             Some(index) => write!(f, "{index}"),
             None => write!(f, "None"),
         }?;
+
         write!(f, ", if_name: ")?;
 
         match &self.if_name {
@@ -327,6 +329,31 @@ impl fmt::Display for Route {
             write!(f, ", luid: ")?;
             match self.luid {
                 Some(l) => write!(f, "{l}"),
+                None => write!(f, "None"),
+            }?;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            write!(f, ", table: {}", self.table)?;
+
+            write!(f, ", source: ")?;
+            match self.source {
+                Some(addr) => write!(f, "{}/{}", addr, self.source_prefix)?,
+                None => write!(f, "None")?,
+            };
+        }
+
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
+        {
+            write!(f, ", pref_source: ")?;
+            match self.pref_source {
+                Some(addr) => write!(f, "{addr}"),
                 None => write!(f, "None"),
             }?;
         }
