@@ -1,6 +1,7 @@
 // See https://github.com/johnyburd/net-route/blob/main/src/platform_impl/macos/macos.rs
 // https://github.com/freebsd/freebsd-src/blob/main/sbin/route/route.c
 // https://github.com/openbsd/src/blob/master/sbin/route/route.c
+// https://github.com/NetBSD/src/blob/trunk/sbin/route/route.c
 
 use crate::{Route, RouteChange};
 use std::collections::VecDeque;
@@ -16,6 +17,7 @@ pub use async_route::*;
 mod bind;
 use crate::if_index_to_name;
 use bind::*;
+
 /// RouteListener for receiving route change events.
 pub struct RouteListener {
     list: VecDeque<RouteChange>,
@@ -23,6 +25,7 @@ pub struct RouteListener {
     #[cfg(feature = "shutdown")]
     pub(crate) shutdown_handle: crate::RouteListenerShutdown,
 }
+
 impl RouteListener {
     /// Creates a new RouteListener.
     pub fn new() -> io::Result<Self> {
@@ -60,11 +63,13 @@ impl RouteListener {
         }
     }
 }
+
 impl AsRawFd for RouteListener {
     fn as_raw_fd(&self) -> RawFd {
         self.route_socket.as_raw_fd()
     }
 }
+
 impl RouteListener {
     /// Listens for a route change event and returns a RouteChange.
     #[cfg(feature = "shutdown")]
@@ -97,6 +102,7 @@ impl RouteListener {
 pub struct RouteManager {
     _private: std::marker::PhantomData<()>,
 }
+
 impl RouteManager {
     /// Creates a new RouteManager.
     pub fn new() -> io::Result<Self> {
@@ -245,13 +251,14 @@ fn add_or_del_route(route: &Route, rtm_type: u8) -> io::Result<()> {
 
     Ok(())
 }
+
 fn route_to_m_rtmsg(_rtm_type: u8, value: &Route) -> io::Result<m_rtmsg> {
     value.check()?;
     let mut rtmsg = m_rtmsg {
         hdr: rt_msghdr::default(),
         attrs: [0u8; 512],
     };
-
+    let if_index = value.get_index();
     let mut attr_offset = put_ip_addr(0, &mut rtmsg, value.destination)?;
 
     if let Some(gateway) = value.gateway {
@@ -259,7 +266,7 @@ fn route_to_m_rtmsg(_rtm_type: u8, value: &Route) -> io::Result<m_rtmsg> {
     }
 
     if _rtm_type == RTM_ADD as u8 && value.gateway.is_none() {
-        if let Some(if_index) = value.get_index() {
+        if let Some(if_index) = if_index {
             attr_offset = put_ifa_addr(attr_offset, &mut rtmsg, if_index)?;
         }
     }
@@ -272,12 +279,14 @@ fn route_to_m_rtmsg(_rtm_type: u8, value: &Route) -> io::Result<m_rtmsg> {
     }
 
     if _rtm_type != RTM_ADD as u8 || value.gateway.is_none() {
-        if let Some(if_index) = value.get_index() {
+        if let Some(if_index) = if_index {
             attr_offset = put_ifa_addr(attr_offset, &mut rtmsg, if_index)?;
         }
     }
 
     let msg_len = std::mem::size_of::<rt_msghdr>() + attr_offset;
+    // Only OpenBSD uses rtm_hdrlen field in the rt_msghdr structure
+    // NetBSD, FreeBSD and macOS only use rtm_msglen
     #[cfg(target_os = "openbsd")]
     {
         rtmsg.hdr.rtm_hdrlen = std::mem::size_of::<rt_msghdr>() as u16;
@@ -302,6 +311,7 @@ fn put_ifa_addr(mut attr_offset: usize, rtmsg: &mut m_rtmsg, if_index: u32) -> i
     attr_offset += sa_size(sdl_len);
     Ok(attr_offset)
 }
+
 fn put_ip_addr(mut attr_offset: usize, rtmsg: &mut m_rtmsg, addr: IpAddr) -> io::Result<usize> {
     match addr {
         IpAddr::V4(addr) => {
@@ -327,18 +337,23 @@ fn put_ip_addr(mut attr_offset: usize, rtmsg: &mut m_rtmsg, addr: IpAddr) -> io:
     }
     Ok(attr_offset)
 }
+
 #[cfg(target_os = "macos")]
 fn sa_size(len: usize) -> usize {
     len
 }
-#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
+
+// NetBSD uses the same socket address alignment as FreeBSD and OpenBSD
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
 fn sa_size(sa_len: usize) -> usize {
     // See https://github.com/freebsd/freebsd-src/blob/7e51bc6cdd5c317109e25b0b64230d00d68dceb3/contrib/bsnmp/lib/support.h#L89
+    // NetBSD follows the same alignment rules as FreeBSD and OpenBSD
     if sa_len == 0 {
         return std::mem::size_of::<libc::c_long>();
     }
     1 + ((sa_len - 1) | (std::mem::size_of::<libc::c_long>() - 1))
 }
+
 fn deserialize_res_change<F: FnMut(RouteChange)>(mut add_fn: F, msgs_buf: &[u8]) -> io::Result<()> {
     deserialize_res(
         |rtm_type, route| {
@@ -353,6 +368,7 @@ fn deserialize_res_change<F: FnMut(RouteChange)>(mut add_fn: F, msgs_buf: &[u8])
         msgs_buf,
     )
 }
+
 fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::Result<()> {
     let mut offset = 0;
     while offset + std::mem::size_of::<rt_msghdr>() <= msgs_buf.len() {
@@ -371,10 +387,17 @@ fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::
         if (rt_hdr.rtm_flags as u32 & (RTF_GATEWAY | RTF_STATIC | RTF_LLINFO)) == 0 {
             continue;
         }
-        #[cfg(target_os = "openbsd")]
+        #[cfg(any(target_os = "openbsd", target_os = "netbsd"))]
         if (rt_hdr.rtm_flags as u32 & (RTF_LOCAL | RTF_BROADCAST)) != 0 {
             continue;
         }
+
+        // NetBSD has slightly different route filtering logic
+        #[cfg(target_os = "netbsd")]
+        if (rt_hdr.rtm_flags as u32 & (RTF_GATEWAY | RTF_STATIC)) == 0 {
+            continue;
+        }
+
         if rt_hdr.rtm_errno != 0 {
             return Err(io::Error::from_raw_os_error(rt_hdr.rtm_errno));
         }
@@ -402,7 +425,7 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
     }
 
     // The body of the route message (msg) is a list of `struct sockaddr`. However, thanks to v6,
-    // the size
+    // the size varies
 
     // See https://opensource.apple.com/source/network_cmds/network_cmds-606.40.2/netstat.tproj/route.c.auto.html,
     // function `get_rtaddrs()`
@@ -422,7 +445,9 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
             let sa: &sockaddr = unsafe { &*(buf.as_ptr() as *const sockaddr) };
             assert!(buf.len() >= sa.sa_len as usize);
             *item = Some(sa);
-            #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
+
+            // NetBSD uses the same alignment as FreeBSD and OpenBSD
+            #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
             {
                 cur_pos += sa_size(sa.sa_len as usize);
             }
@@ -514,6 +539,7 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
         if_index: Some(hdr.rtm_index as u32),
     })
 }
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[allow(non_camel_case_types)]
@@ -521,6 +547,7 @@ struct m_rtmsg {
     hdr: rt_msghdr,
     attrs: [u8; 512],
 }
+
 impl m_rtmsg {
     pub(crate) fn slice(&self) -> &[u8] {
         let slice = {
@@ -531,6 +558,7 @@ impl m_rtmsg {
         slice
     }
 }
+
 impl Default for sockaddr_dl {
     fn default() -> Self {
         let mut sdl: sockaddr_dl = unsafe { mem::zeroed() };
@@ -539,11 +567,13 @@ impl Default for sockaddr_dl {
         sdl
     }
 }
+
 impl Default for rt_metrics {
     fn default() -> Self {
         unsafe { mem::zeroed() }
     }
 }
+
 impl Default for rt_msghdr {
     fn default() -> Self {
         unsafe { mem::zeroed() }
@@ -568,6 +598,7 @@ fn sa_to_ip(sa: &sockaddr) -> Option<IpAddr> {
         _ => None,
     }
 }
+
 impl From<Ipv4Addr> for sockaddr_in {
     fn from(ip: Ipv4Addr) -> Self {
         let sa_len = std::mem::size_of::<sockaddr_in>();
@@ -582,6 +613,7 @@ impl From<Ipv4Addr> for sockaddr_in {
         }
     }
 }
+
 impl From<Ipv6Addr> for sockaddr_in6 {
     fn from(ip: Ipv6Addr) -> Self {
         let sa_len = std::mem::size_of::<sockaddr_in6>();
@@ -599,6 +631,7 @@ impl From<Ipv6Addr> for sockaddr_in6 {
         }
     }
 }
+
 fn create_route_socket() -> io::Result<UnixStream> {
     let fd = unsafe { socket(PF_ROUTE as i32, SOCK_RAW as i32, AF_UNSPEC as i32) };
     if fd < 0 {

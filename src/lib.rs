@@ -65,9 +65,19 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::*;
 
-#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "macos"))]
+#[cfg(any(
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "macos",
+    target_os = "netbsd"
+))]
 mod unix_bsd;
-#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "macos"))]
+#[cfg(any(
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "macos",
+    target_os = "netbsd"
+))]
 pub use unix_bsd::*;
 
 #[cfg(unix)]

@@ -10,3 +10,6 @@ include!("openbsd_bindings.rs");
 
 #[cfg(all(target_os = "macos", docsrs))]
 include!("macos_bindings.rs");
+
+#[cfg(all(target_os = "netbsd", docsrs))]
+include!("netbsd_bindings.rs");
