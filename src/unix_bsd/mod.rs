@@ -219,6 +219,10 @@ fn add_or_del_route_req(route: &Route, rtm_type: u8) -> io::Result<m_rtmsg> {
     if rtm_type == RTM_ADD as u8 || route.gateway.is_some() {
         rtm_addrs |= RTA_GATEWAY;
     }
+    #[cfg(target_os = "netbsd")]
+    if route.if_index.is_some() || route.if_name.is_some() {
+        rtm_addrs |= RTA_IFP;
+    }
     #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
     if route.pref_source.is_some() {
         rtm_addrs |= RTA_IFA;
@@ -278,10 +282,8 @@ fn route_to_m_rtmsg(_rtm_type: u8, value: &Route) -> io::Result<m_rtmsg> {
         attr_offset = put_ip_addr(attr_offset, &mut rtmsg, source_addr)?;
     }
 
-    if _rtm_type != RTM_ADD as u8 || value.gateway.is_none() {
-        if let Some(if_index) = if_index {
-            attr_offset = put_ifa_addr(attr_offset, &mut rtmsg, if_index)?;
-        }
+    if let Some(if_index) = if_index {
+        attr_offset = put_ifa_addr(attr_offset, &mut rtmsg, if_index)?;
     }
 
     let msg_len = std::mem::size_of::<rt_msghdr>() + attr_offset;
