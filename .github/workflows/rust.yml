@@ -63,6 +63,7 @@ jobs:
             cargo fmt --all -- --check
             export CARGO_TERM_COLOR=always
             cargo clippy --all-targets -- -D warnings
+            cargo clippy --all-targets --features build-bindings  -- -D warnings
 
   semver:
     name: Check semver
