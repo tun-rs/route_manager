@@ -58,13 +58,13 @@ targets = [
 
 [features]
 default = []
-build-bindings = []
+bindgen = ["dep:bindgen"]
 shutdown = []
 async = ["tokio"]
 async_io = ["async-io"]
 
 [build-dependencies]
-bindgen = "0.72"
+bindgen = { version = "0.72.0", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.43.0", features = ["full"] }
