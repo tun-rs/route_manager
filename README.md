@@ -15,6 +15,7 @@ with support for asynchronous or synchronous monitoring of route changes.
 | macOS    | ✅ |
 | FreeBSD  | ✅ |
 | OpenBSD  | ✅ |
+| NetBSD   | ✅ |
 
 ## Features:
 

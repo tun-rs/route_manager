@@ -6,9 +6,17 @@ fn main() {
         println!("cargo:rustc-cfg=docsrs");
         return;
     }
+    let build_bindings_enabled = std::env::var_os("CARGO_FEATURE_BUILD_BINDINGS").is_some();
+    if !build_bindings_enabled {
+        return;
+    }
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
-    if target_os == "macos" || target_os == "freebsd" || target_os == "openbsd" {
+    if target_os == "macos"
+        || target_os == "freebsd"
+        || target_os == "openbsd"
+        || target_os == "netbsd"
+    {
         build_wrapper();
     }
 }

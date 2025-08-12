@@ -58,6 +58,7 @@ targets = [
 
 [features]
 default = []
+build-bindings = []
 shutdown = []
 async = ["tokio"]
 async_io = ["async-io"]
