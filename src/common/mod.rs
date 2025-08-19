@@ -26,7 +26,8 @@ pub struct Route {
         target_os = "linux",
         target_os = "freebsd",
         target_os = "openbsd",
-        target_os = "netbsd"
+        target_os = "netbsd",
+        target_os = "macos",
     ))]
     pub(crate) pref_source: Option<IpAddr>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -98,7 +99,8 @@ impl Route {
                 target_os = "linux",
                 target_os = "freebsd",
                 target_os = "openbsd",
-                target_os = "netbsd"
+                target_os = "netbsd",
+                target_os = "macos",
             ))]
             pref_source: None,
             #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -141,7 +143,8 @@ impl Route {
         target_os = "linux",
         target_os = "freebsd",
         target_os = "openbsd",
-        target_os = "netbsd"
+        target_os = "netbsd",
+        target_os = "macos",
     ))]
     pub fn with_pref_source(mut self, pref_source: IpAddr) -> Self {
         self.pref_source = Some(pref_source);
@@ -348,7 +351,8 @@ impl fmt::Display for Route {
             target_os = "linux",
             target_os = "freebsd",
             target_os = "openbsd",
-            target_os = "netbsd"
+            target_os = "netbsd",
+            target_os = "macos",
         ))]
         {
             write!(f, ", pref_source: ")?;
