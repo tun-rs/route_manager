@@ -4,6 +4,7 @@ use crate::linux::{
 };
 use crate::AsyncRoute;
 use crate::{Route, RouteChange};
+use netlink_packet_route::AddressFamily;
 use std::collections::VecDeque;
 use std::io;
 /// AsyncRouteListener for asynchronously receiving route change events.
@@ -42,6 +43,7 @@ impl AsyncRouteListener {
         }
     }
 }
+
 /// AsyncRouteManager for asynchronously managing routes (adding, deleting, and listing).
 pub struct AsyncRouteManager {
     _private: std::marker::PhantomData<()>,
@@ -57,16 +59,18 @@ impl AsyncRouteManager {
     pub fn listener() -> io::Result<AsyncRouteListener> {
         AsyncRouteListener::new()
     }
-    /// Asynchronously lists all current routes.
-    pub async fn list(&mut self) -> io::Result<Vec<Route>> {
-        let req = list_route_req();
-        let mut socket = AsyncRoute::new(RouteSocket::new()?)?;
-        socket.write_with(|s| s.send(&req)).await?;
-        let mut buf = vec![0; 4096];
-        let mut list = Vec::new();
 
+    async fn query_routes_family(
+        &self,
+        socket: &mut AsyncRoute<RouteSocket>,
+        buf: &mut [u8],
+        family: AddressFamily,
+        list: &mut Vec<RouteChange>,
+    ) -> io::Result<()> {
+        let req = list_route_req(family);
+        socket.write_with(|s| s.send(&req)).await?;
         loop {
-            let len = socket.read_with(|s| s.recv(&mut buf)).await?;
+            let len = socket.read_with(|s| s.recv(buf)).await?;
             let rs = deserialize_res(
                 |route| {
                     list.push(route);
@@ -77,7 +81,32 @@ impl AsyncRouteManager {
                 break;
             }
         }
-        Ok(convert_add_route(list))
+        Ok(())
+    }
+
+    /// Asynchronously lists all current routes.
+    pub async fn list(&mut self) -> io::Result<Vec<Route>> {
+        let mut buf = vec![0; 4096];
+        let mut list = Vec::new();
+        let mut socket = AsyncRoute::new(RouteSocket::new()?)?;
+
+        // Query IPv4 routes
+        let v4_result = self
+            .query_routes_family(&mut socket, &mut buf, AddressFamily::Inet, &mut list)
+            .await;
+
+        // Query IPv6 routes
+        let v6_result = self
+            .query_routes_family(&mut socket, &mut buf, AddressFamily::Inet6, &mut list)
+            .await;
+
+        // Only fail if both queries failed. If at least one succeeded, return partial results.
+        match (v4_result, v6_result) {
+            (Ok(_), Ok(_)) => Ok(convert_add_route(list)),
+            (Ok(_), Err(_)) => Ok(convert_add_route(list)), // IPv4 succeeded
+            (Err(_), Ok(_)) => Ok(convert_add_route(list)), // IPv6 succeeded
+            (Err(e), Err(_)) => Err(e),                     // Both failed, return first error
+        }
     }
     /// Asynchronously adds a new route.
     pub async fn add(&mut self, route: &Route) -> io::Result<()> {

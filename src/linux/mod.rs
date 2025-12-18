@@ -139,15 +139,17 @@ impl RouteManager {
         RouteListener::new()
     }
 
-    /// Lists all current routes.
-    pub fn list(&mut self) -> io::Result<Vec<Route>> {
-        let req = list_route_req();
-        let socket = RouteSocket::new()?;
+    fn query_routes_family(
+        &self,
+        socket: &RouteSocket,
+        buf: &mut [u8],
+        family: AddressFamily,
+        list: &mut Vec<RouteChange>,
+    ) -> io::Result<()> {
+        let req = list_route_req(family);
         socket.send(&req)?;
-        let mut buf = vec![0; 4096];
-        let mut list = Vec::new();
         loop {
-            let len = socket.recv(&mut buf)?;
+            let len = socket.recv(buf)?;
             let rs = deserialize_res(
                 |route| {
                     list.push(route);
@@ -158,7 +160,29 @@ impl RouteManager {
                 break;
             }
         }
-        Ok(convert_add_route(list))
+        Ok(())
+    }
+
+    /// Lists all current routes.
+    pub fn list(&mut self) -> io::Result<Vec<Route>> {
+        let mut buf = vec![0; 4096];
+        let mut list = Vec::new();
+        let socket = RouteSocket::new()?;
+
+        // Query IPv4 routes
+        let v4_result = self.query_routes_family(&socket, &mut buf, AddressFamily::Inet, &mut list);
+
+        // Query IPv6 routes
+        let v6_result =
+            self.query_routes_family(&socket, &mut buf, AddressFamily::Inet6, &mut list);
+
+        // Only fail if both queries failed. If at least one succeeded, return partial results.
+        match (v4_result, v6_result) {
+            (Ok(_), Ok(_)) => Ok(convert_add_route(list)),
+            (Ok(_), Err(_)) => Ok(convert_add_route(list)), // IPv4 succeeded
+            (Err(_), Ok(_)) => Ok(convert_add_route(list)), // IPv6 succeeded
+            (Err(e), Err(_)) => Err(e),                     // Both failed, return first error
+        }
     }
     /// Adds a new route.
     pub fn add(&mut self, route: &Route) -> io::Result<()> {
@@ -365,12 +389,16 @@ impl TryFrom<&Route> for RouteMessage {
     }
 }
 
-pub(crate) fn list_route_req() -> Vec<u8> {
+pub(crate) fn list_route_req(family: AddressFamily) -> Vec<u8> {
     let mut nl_hdr = NetlinkHeader::default();
     nl_hdr.flags = NLM_F_REQUEST | NLM_F_DUMP;
+
+    let mut route_msg = RouteMessage::default();
+    route_msg.header.address_family = family;
+
     let mut packet = NetlinkMessage::new(
         nl_hdr,
-        NetlinkPayload::from(RouteNetlinkMessage::GetRoute(RouteMessage::default())),
+        NetlinkPayload::from(RouteNetlinkMessage::GetRoute(route_msg)),
     );
 
     packet.finalize();
