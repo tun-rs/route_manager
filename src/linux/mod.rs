@@ -139,17 +139,14 @@ impl RouteManager {
         RouteListener::new()
     }
 
-    fn query_routes_family(
-        &self,
-        socket: &RouteSocket,
-        buf: &mut [u8],
-        family: AddressFamily,
-        list: &mut Vec<RouteChange>,
-    ) -> io::Result<()> {
+    /// Lists routes for a specific address family.
+    fn list_family(socket: &RouteSocket, family: AddressFamily) -> io::Result<Vec<RouteChange>> {
+        let mut buf = vec![0; 4096];
+        let mut list = Vec::new();
         let req = list_route_req(family);
         socket.send(&req)?;
         loop {
-            let len = socket.recv(buf)?;
+            let len = socket.recv(&mut buf)?;
             let rs = deserialize_res(
                 |route| {
                     list.push(route);
@@ -160,29 +157,27 @@ impl RouteManager {
                 break;
             }
         }
-        Ok(())
+        Ok(list)
     }
 
     /// Lists all current routes.
     pub fn list(&mut self) -> io::Result<Vec<Route>> {
-        let mut buf = vec![0; 4096];
-        let mut list = Vec::new();
         let socket = RouteSocket::new()?;
 
         // Query IPv4 routes
-        let v4_result = self.query_routes_family(&socket, &mut buf, AddressFamily::Inet, &mut list);
+        let v4_result = Self::list_family(&socket, AddressFamily::Inet);
 
         // Query IPv6 routes
-        let v6_result =
-            self.query_routes_family(&socket, &mut buf, AddressFamily::Inet6, &mut list);
+        let v6_result = Self::list_family(&socket, AddressFamily::Inet6);
 
         // Only fail if both queries failed. If at least one succeeded, return partial results.
-        match (v4_result, v6_result) {
-            (Ok(_), Ok(_)) => Ok(convert_add_route(list)),
-            (Ok(_), Err(_)) => Ok(convert_add_route(list)), // IPv4 succeeded
-            (Err(_), Ok(_)) => Ok(convert_add_route(list)), // IPv6 succeeded
-            (Err(e), Err(_)) => Err(e),                     // Both failed, return first error
-        }
+        let list = match (v4_result, v6_result) {
+            (Ok(v4), Ok(v6)) => [v4, v6].concat(),
+            (Ok(v4), Err(_)) => v4, // IPv4 succeeded
+            (Err(_), Ok(v6)) => v6, // IPv6 succeeded
+            (Err(e), Err(_)) => return Err(e), // Both failed, return first error
+        };
+        Ok(convert_add_route(list))
     }
     /// Adds a new route.
     pub fn add(&mut self, route: &Route) -> io::Result<()> {
