@@ -173,8 +173,8 @@ impl RouteManager {
         // Only fail if both queries failed. If at least one succeeded, return partial results.
         let list = match (v4_result, v6_result) {
             (Ok(v4), Ok(v6)) => [v4, v6].concat(),
-            (Ok(v4), Err(_)) => v4, // IPv4 succeeded
-            (Err(_), Ok(v6)) => v6, // IPv6 succeeded
+            (Ok(v4), Err(_)) => v4,            // IPv4 succeeded
+            (Err(_), Ok(v6)) => v6,            // IPv6 succeeded
             (Err(e), Err(_)) => return Err(e), // Both failed, return first error
         };
         Ok(convert_add_route(list))

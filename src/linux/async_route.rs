@@ -60,7 +60,10 @@ impl AsyncRouteManager {
     }
 
     /// Asynchronously lists routes for a specific address family.
-    async fn list_family(socket: &mut AsyncRoute<RouteSocket>, family: AddressFamily) -> io::Result<Vec<RouteChange>> {
+    async fn list_family(
+        socket: &mut AsyncRoute<RouteSocket>,
+        family: AddressFamily,
+    ) -> io::Result<Vec<RouteChange>> {
         let mut buf = vec![0; 4096];
         let mut list = Vec::new();
         let req = list_route_req(family);
@@ -93,8 +96,8 @@ impl AsyncRouteManager {
         // Only fail if both queries failed. If at least one succeeded, return partial results.
         let list = match (v4_result, v6_result) {
             (Ok(v4), Ok(v6)) => [v4, v6].concat(),
-            (Ok(v4), Err(_)) => v4, // IPv4 succeeded
-            (Err(_), Ok(v6)) => v6, // IPv6 succeeded
+            (Ok(v4), Err(_)) => v4,            // IPv4 succeeded
+            (Err(_), Ok(v6)) => v6,            // IPv6 succeeded
             (Err(e), Err(_)) => return Err(e), // Both failed, return first error
         };
         Ok(convert_add_route(list))
