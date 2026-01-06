@@ -139,13 +139,12 @@ impl RouteManager {
         RouteListener::new()
     }
 
-    /// Lists all current routes.
-    pub fn list(&mut self) -> io::Result<Vec<Route>> {
-        let req = list_route_req();
-        let socket = RouteSocket::new()?;
-        socket.send(&req)?;
+    /// Lists routes for a specific address family.
+    fn list_family(socket: &RouteSocket, family: AddressFamily) -> io::Result<Vec<RouteChange>> {
         let mut buf = vec![0; 4096];
         let mut list = Vec::new();
+        let req = list_route_req(family);
+        socket.send(&req)?;
         loop {
             let len = socket.recv(&mut buf)?;
             let rs = deserialize_res(
@@ -158,6 +157,26 @@ impl RouteManager {
                 break;
             }
         }
+        Ok(list)
+    }
+
+    /// Lists all current routes.
+    pub fn list(&mut self) -> io::Result<Vec<Route>> {
+        let socket = RouteSocket::new()?;
+
+        // Query IPv4 routes
+        let v4_result = Self::list_family(&socket, AddressFamily::Inet);
+
+        // Query IPv6 routes
+        let v6_result = Self::list_family(&socket, AddressFamily::Inet6);
+
+        // Only fail if both queries failed. If at least one succeeded, return partial results.
+        let list = match (v4_result, v6_result) {
+            (Ok(v4), Ok(v6)) => [v4, v6].concat(),
+            (Ok(v4), Err(_)) => v4,            // IPv4 succeeded
+            (Err(_), Ok(v6)) => v6,            // IPv6 succeeded
+            (Err(e), Err(_)) => return Err(e), // Both failed, return first error
+        };
         Ok(convert_add_route(list))
     }
     /// Adds a new route.
@@ -365,12 +384,16 @@ impl TryFrom<&Route> for RouteMessage {
     }
 }
 
-pub(crate) fn list_route_req() -> Vec<u8> {
+pub(crate) fn list_route_req(family: AddressFamily) -> Vec<u8> {
     let mut nl_hdr = NetlinkHeader::default();
     nl_hdr.flags = NLM_F_REQUEST | NLM_F_DUMP;
+
+    let mut route_msg = RouteMessage::default();
+    route_msg.header.address_family = family;
+
     let mut packet = NetlinkMessage::new(
         nl_hdr,
-        NetlinkPayload::from(RouteNetlinkMessage::GetRoute(RouteMessage::default())),
+        NetlinkPayload::from(RouteNetlinkMessage::GetRoute(route_msg)),
     );
 
     packet.finalize();
