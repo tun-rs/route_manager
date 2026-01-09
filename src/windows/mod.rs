@@ -5,7 +5,6 @@ use crate::RouteChange;
 use flume::{Receiver, Sender};
 use std::io;
 use std::net::IpAddr;
-use std::os::windows::io::RawHandle;
 use std::os::windows::raw::HANDLE;
 use std::sync::{Arc, Mutex};
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
@@ -22,6 +21,10 @@ pub(crate) mod ffi;
 pub use async_route::*;
 pub(crate) use ffi::*;
 
+#[repr(transparent)]
+struct NotifyHandle(HANDLE);
+unsafe impl Send for NotifyHandle {}
+unsafe impl Sync for NotifyHandle {}
 /// RouteListener for receiving route change events.
 pub struct RouteListener {
     handle: Arc<Mutex<Option<RouteHandle>>>,
@@ -46,7 +49,7 @@ impl RouteListener {
             return Err(io::Error::from_raw_os_error(ret as i32));
         }
         Ok(RouteListener {
-            handle: Arc::new(Mutex::new(Some((handle, sender)))),
+            handle: Arc::new(Mutex::new(Some((NotifyHandle(handle), sender)))),
             receiver,
         })
     }
@@ -68,7 +71,7 @@ impl RouteListener {
 fn shutdown(handle: &Mutex<Option<RouteHandle>>) {
     if let Some((handle, sender)) = handle.lock().unwrap().take() {
         unsafe {
-            CancelMibChangeNotify2(handle);
+            CancelMibChangeNotify2(handle.0);
         }
         drop(sender)
     }
@@ -80,7 +83,7 @@ fn shutdown(handle: &Mutex<Option<RouteHandle>>) {
 pub struct RouteListenerShutdown {
     handle: Arc<Mutex<Option<RouteHandle>>>,
 }
-type RouteHandle = (RawHandle, Box<Sender<RouteChange>>);
+type RouteHandle = (NotifyHandle, Box<Sender<RouteChange>>);
 #[cfg(feature = "shutdown")]
 impl RouteListenerShutdown {
     /// Shuts down the RouteListener.
