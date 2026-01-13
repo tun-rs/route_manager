@@ -76,7 +76,7 @@ impl AsyncRouteManager {
                 },
                 &buf[..len],
             )?;
-            if !rs {
+            if rs {
                 break;
             }
         }

@@ -153,7 +153,7 @@ impl RouteManager {
                 },
                 &buf[..len],
             )?;
-            if !rs {
+            if rs {
                 break;
             }
         }
