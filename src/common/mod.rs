@@ -33,6 +33,8 @@ pub struct Route {
     pub(crate) metric: Option<u32>,
     #[cfg(target_os = "windows")]
     pub(crate) luid: Option<u64>,
+    #[cfg(target_os = "macos")]
+    pub(crate) if_scope: bool,
 }
 impl Route {
     pub fn destination(&self) -> IpAddr {
@@ -79,6 +81,11 @@ impl Route {
     pub fn luid(&self) -> Option<u64> {
         self.luid
     }
+    /// (macOS only) Returns whether RTF_IFSCOPE is enabled for this route.
+    #[cfg(target_os = "macos")]
+    pub fn if_scope(&self) -> bool {
+        self.if_scope
+    }
 }
 impl Route {
     pub fn new(destination: IpAddr, prefix: u8) -> Self {
@@ -105,6 +112,8 @@ impl Route {
             metric: None,
             #[cfg(target_os = "windows")]
             luid: None,
+            #[cfg(target_os = "macos")]
+            if_scope: false,
         }
     }
     /// Sets the gateway (next hop) for the route.
@@ -159,6 +168,15 @@ impl Route {
         self.luid = Some(luid);
         self
     }
+    /// (macOS only) Enables or disables RTF_IFSCOPE, binding the route to the
+    /// interface specified via [`with_if_index`](Self::with_if_index) /
+    /// [`with_if_name`](Self::with_if_name). When enabled, route lookups are
+    /// scoped to that interface. Defaults to `false`.
+    #[cfg(target_os = "macos")]
+    pub fn with_if_scope(mut self, if_scope: bool) -> Self {
+        self.if_scope = if_scope;
+        self
+    }
 }
 impl Route {
     pub fn check(&self) -> io::Result<()> {
@@ -184,6 +202,12 @@ impl Route {
                     return Err(io::Error::other("if_index mismatch"));
                 }
             }
+        }
+        #[cfg(target_os = "macos")]
+        if self.if_scope && self.get_index().is_none() {
+            return Err(io::Error::other(
+                "if_scope requires an interface (if_index or if_name)",
+            ));
         }
         Ok(())
     }
@@ -331,6 +355,11 @@ impl fmt::Display for Route {
                 Some(l) => write!(f, "{l}"),
                 None => write!(f, "None"),
             }?;
+        }
+
+        #[cfg(target_os = "macos")]
+        if self.if_scope {
+            write!(f, ", if_scope: true")?;
         }
 
         #[cfg(target_os = "linux")]

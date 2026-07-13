@@ -215,6 +215,11 @@ fn add_or_del_route_req(route: &Route, rtm_type: u8) -> io::Result<m_rtmsg> {
         rtm_flags |= RTF_HOST;
     }
 
+    #[cfg(target_os = "macos")]
+    if route.if_scope {
+        rtm_flags |= RTF_IFSCOPE;
+    }
+
     let mut rtm_addrs = RTA_DST | RTA_NETMASK;
     if rtm_type == RTM_ADD as u8 || route.gateway.is_some() {
         rtm_addrs |= RTA_GATEWAY;
@@ -292,6 +297,12 @@ fn route_to_m_rtmsg(_rtm_type: u8, value: &Route) -> io::Result<m_rtmsg> {
     #[cfg(target_os = "openbsd")]
     {
         rtmsg.hdr.rtm_hdrlen = std::mem::size_of::<rt_msghdr>() as u16;
+    }
+    #[cfg(target_os = "macos")]
+    if value.if_scope {
+        if let Some(idx) = if_index {
+            rtmsg.hdr.rtm_index = idx as u_short;
+        }
     }
     rtmsg.hdr.rtm_msglen = msg_len as u16;
     Ok(rtmsg)
@@ -531,6 +542,9 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    let if_scope = hdr.rtm_flags as u32 & RTF_IFSCOPE != 0;
+
     Some(Route {
         destination,
         prefix,
@@ -539,6 +553,8 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
         pref_source,
         if_name: if_index_to_name(hdr.rtm_index as u32).ok(),
         if_index: Some(hdr.rtm_index as u32),
+        #[cfg(target_os = "macos")]
+        if_scope,
     })
 }
 
