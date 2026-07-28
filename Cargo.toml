@@ -68,3 +68,4 @@ bindgen = { version = "0.72", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.43.0", features = ["full"] }
+clap = { version = "4.6.4", features = ["derive"] }
