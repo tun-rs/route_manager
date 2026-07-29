@@ -1,6 +1,7 @@
 use crate::Route;
 use std::net::IpAddr;
 use std::{io, mem};
+use windows_sys::Win32::Foundation::{ERROR_SUCCESS, WIN32_ERROR};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceAliasToLuid, ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToAlias,
     ConvertInterfaceLuidToIndex, InitializeIpForwardEntry, MIB_IPFORWARD_ROW2,
@@ -17,6 +18,15 @@ pub(crate) fn decode_utf16(string: &[u16]) -> String {
     let end = string.iter().position(|b| *b == 0).unwrap_or(string.len());
     String::from_utf16_lossy(&string[..end])
 }
+
+fn win32_status_to_io_result(status: WIN32_ERROR) -> io::Result<()> {
+    if status == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(status as i32))
+    }
+}
+
 pub(crate) fn if_name_to_index(name: &str) -> io::Result<u32> {
     let luid = alias_to_luid(name)?;
     luid_to_index(&luid)
@@ -28,35 +38,31 @@ pub(crate) fn if_index_to_name(index: u32) -> io::Result<String> {
 pub(crate) fn alias_to_luid(alias: &str) -> io::Result<NET_LUID_LH> {
     let alias = encode_utf16(alias);
     let mut luid = unsafe { mem::zeroed() };
-    match unsafe { ConvertInterfaceAliasToLuid(alias.as_ptr(), &mut luid) } {
-        0 => Ok(luid),
-        _err => Err(io::Error::last_os_error()),
-    }
+    let status = unsafe { ConvertInterfaceAliasToLuid(alias.as_ptr(), &mut luid) };
+    win32_status_to_io_result(status)?;
+    Ok(luid)
 }
 
 pub(crate) fn index_to_luid(index: u32) -> io::Result<NET_LUID_LH> {
     let mut luid = unsafe { mem::zeroed() };
-    match unsafe { ConvertInterfaceIndexToLuid(index, &mut luid) } {
-        0 => Ok(luid),
-        _err => Err(io::Error::last_os_error()),
-    }
+    let status = unsafe { ConvertInterfaceIndexToLuid(index, &mut luid) };
+    win32_status_to_io_result(status)?;
+    Ok(luid)
 }
 
 pub(crate) fn luid_to_index(luid: &NET_LUID_LH) -> io::Result<u32> {
     let mut index = 0;
-    match unsafe { ConvertInterfaceLuidToIndex(luid, &mut index) } {
-        0 => Ok(index),
-        _err => Err(io::Error::last_os_error()),
-    }
+    let status = unsafe { ConvertInterfaceLuidToIndex(luid, &mut index) };
+    win32_status_to_io_result(status)?;
+    Ok(index)
 }
 
 pub(crate) fn luid_to_alias(luid: &NET_LUID_LH) -> io::Result<String> {
     // IF_MAX_STRING_SIZE + 1
     let mut alias = vec![0; 257];
-    match unsafe { ConvertInterfaceLuidToAlias(luid, alias.as_mut_ptr(), alias.len()) } {
-        0 => Ok(decode_utf16(&alias)),
-        _err => Err(io::Error::last_os_error()),
-    }
+    let status = unsafe { ConvertInterfaceLuidToAlias(luid, alias.as_mut_ptr(), alias.len()) };
+    win32_status_to_io_result(status)?;
+    Ok(decode_utf16(&alias))
 }
 
 pub(crate) unsafe fn row_to_route(row: *const MIB_IPFORWARD_ROW2) -> Option<Route> {
@@ -150,5 +156,31 @@ impl TryFrom<&Route> for MIB_IPFORWARD_ROW2 {
         }
 
         Ok(row)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
+
+    #[test]
+    fn win32_status_preserves_success_and_error_codes() {
+        assert!(win32_status_to_io_result(ERROR_SUCCESS).is_ok());
+
+        let error = win32_status_to_io_result(ERROR_INVALID_PARAMETER).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(ERROR_INVALID_PARAMETER as i32));
+    }
+
+    #[test]
+    fn invalid_interface_index_does_not_report_os_error_zero() {
+        let Err(error) = index_to_luid(u32::MAX) else {
+            panic!("u32::MAX unexpectedly resolved to a Windows interface");
+        };
+
+        let raw_error = error
+            .raw_os_error()
+            .expect("Windows interface conversion error should have a raw OS error code");
+        assert_ne!(raw_error, ERROR_SUCCESS as i32);
     }
 }
