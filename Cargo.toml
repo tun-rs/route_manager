@@ -24,7 +24,7 @@ async-io = { version = "2.3", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 netlink-packet-route = "0.31"
 netlink-sys = "0.8"
-netlink-packet-core = "0.8"
+netlink-packet-core = "0.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 flume = "0.12"
