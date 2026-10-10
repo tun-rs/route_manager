@@ -9,20 +9,27 @@ pub enum RouteChange {
     Change(Route),
 }
 
-/// (Linux only) The kind of a route (`rtm_type`). Only unicast routes forward
-/// traffic; the others refuse it at lookup.
-#[cfg(target_os = "linux")]
+/// (Linux and macOS) The kind of a route. Only unicast routes forward
+/// traffic; the others refuse it. On Linux the kind is the route type
+/// (`rtm_type`). On macOS it is a route flag, which the kernel enforces only on
+/// routes through `lo0`, so this crate adds such routes through `lo0`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RouteKind {
     /// A regular route that forwards traffic (`RTN_UNICAST`).
     #[default]
     Unicast,
-    /// Lookups fail with `EHOSTUNREACH` ("No route to host") (`RTN_UNREACHABLE`).
+    /// Linux (`RTN_UNREACHABLE`): lookups fail with `EHOSTUNREACH` ("No route
+    /// to host"). macOS (`RTF_REJECT`): connections fail with `ENETUNREACH`, or
+    /// with `EHOSTUNREACH` for a host route.
     Unreachable,
-    /// Packets are discarded silently; local sockets get `EINVAL` (`RTN_BLACKHOLE`).
+    /// Linux (`RTN_BLACKHOLE`): packets are discarded silently; local sockets
+    /// get `EINVAL`. macOS (`RTF_BLACKHOLE`): IPv4 packets are discarded
+    /// silently; IPv6 connections fail with `EHOSTUNREACH` or `ENETUNREACH`.
     Blackhole,
-    /// Lookups fail with `EACCES` (`RTN_PROHIBIT`).
+    /// (Linux only) Lookups fail with `EACCES` (`RTN_PROHIBIT`).
+    #[cfg(target_os = "linux")]
     Prohibit,
 }
 
@@ -35,7 +42,7 @@ pub struct Route {
     pub(crate) if_index: Option<u32>,
     #[cfg(target_os = "linux")]
     pub(crate) table: u8,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) kind: RouteKind,
     #[cfg(target_os = "linux")]
     pub(crate) source: Option<IpAddr>,
@@ -75,8 +82,8 @@ impl Route {
     pub fn table(&self) -> u8 {
         self.table
     }
-    /// (Linux only) Returns the route kind.
-    #[cfg(target_os = "linux")]
+    /// (Linux and macOS) Returns the route kind.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn kind(&self) -> RouteKind {
         self.kind
     }
@@ -121,7 +128,7 @@ impl Route {
             if_index: None,
             #[cfg(target_os = "linux")]
             table: 0,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             kind: RouteKind::Unicast,
             #[cfg(target_os = "linux")]
             source: None,
@@ -163,17 +170,21 @@ impl Route {
         self.table = table;
         self
     }
-    /// (Linux only) Sets the route kind. Defaults to [`RouteKind::Unicast`].
+    /// (Linux and macOS) Sets the route kind. Defaults to [`RouteKind::Unicast`].
     /// Non-unicast routes refuse traffic and take no next hop: a gateway is
-    /// rejected by [`check`](Self::check), and an interface is not sent.
+    /// rejected by [`check`](Self::check), and an interface is ignored.
     ///
-    /// The kernel ignores the kind when deleting an IPv6 route, so
+    /// On macOS the route is added through `lo0`, whose driver refuses the
+    /// traffic, and adding it with `if_scope` fails. Deleting a route matches
+    /// only its destination prefix (and `if_scope`), whatever its kind.
+    ///
+    /// On Linux the kernel ignores the kind when deleting an IPv6 route, so
     /// [`RouteManager::delete`](crate::RouteManager::delete) can remove another
     /// route to the same prefix, such as a unicast route with a lower metric.
     /// To delete exactly a route added this way, give it a nonzero metric with
-    /// [`with_metric`](Self::with_metric), or delete it through the route
-    /// returned by [`RouteManager::list`](crate::RouteManager::list).
-    #[cfg(target_os = "linux")]
+    /// `with_metric`, or delete it through the route returned by
+    /// [`RouteManager::list`](crate::RouteManager::list).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn with_kind(mut self, kind: RouteKind) -> Self {
         self.kind = kind;
         self
@@ -250,7 +261,7 @@ impl Route {
                 "if_scope requires an interface (if_index or if_name)",
             ));
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if self.kind != RouteKind::Unicast && self.gateway.is_some() {
             return Err(io::Error::other("only unicast routes can have a gateway"));
         }
@@ -405,6 +416,11 @@ impl fmt::Display for Route {
         #[cfg(target_os = "macos")]
         if self.if_scope {
             write!(f, ", if_scope: true")?;
+        }
+
+        #[cfg(target_os = "macos")]
+        if self.kind != RouteKind::Unicast {
+            write!(f, ", kind: {:?}", self.kind)?;
         }
 
         #[cfg(target_os = "linux")]
