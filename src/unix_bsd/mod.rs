@@ -520,7 +520,11 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
             {
                 // see ROUNDUP() macro in the route.c file linked above.
                 // The len needs to be a multiple of 4bytes
-                let aligned_len = if sa_len == 0 { 4 } else { ((sa_len - 1) | 0x3) + 1 };
+                let aligned_len = if sa_len == 0 {
+                    4
+                } else {
+                    ((sa_len - 1) | 0x3) + 1
+                };
                 cur_pos += aligned_len;
             }
         }
@@ -571,8 +575,8 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
                     let n = (raw.len() - 4).min(4);
                     mask[..n].copy_from_slice(&raw[4..4 + n]);
                 }
-                prefix = u32::from_be_bytes([mask[0], mask[1], mask[2], mask[3]]).leading_ones()
-                    as u8;
+                prefix =
+                    u32::from_be_bytes([mask[0], mask[1], mask[2], mask[3]]).leading_ones() as u8;
             }
             IpAddr::V6(_) => {
                 // sockaddr_in6: sin6_addr is at offset 8
