@@ -3,6 +3,8 @@
 // https://github.com/openbsd/src/blob/master/sbin/route/route.c
 // https://github.com/NetBSD/src/blob/trunk/sbin/route/route.c
 
+#[cfg(target_os = "macos")]
+use crate::RouteKind;
 use crate::{Route, RouteChange};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -220,6 +222,20 @@ fn add_or_del_route_req(route: &Route, rtm_type: u8) -> io::Result<m_rtmsg> {
         rtm_flags |= RTF_IFSCOPE;
     }
 
+    // These are added through lo0 (see route_to_m_rtmsg), so they cannot be
+    // scoped to the caller's interface
+    #[cfg(target_os = "macos")]
+    if rtm_type == RTM_ADD as u8 && route.kind != RouteKind::Unicast && route.if_scope {
+        return Err(io::Error::other("only unicast routes can use if_scope"));
+    }
+
+    #[cfg(target_os = "macos")]
+    match route.kind {
+        RouteKind::Unicast => {}
+        RouteKind::Unreachable => rtm_flags |= RTF_REJECT,
+        RouteKind::Blackhole => rtm_flags |= RTF_BLACKHOLE,
+    }
+
     let mut rtm_addrs = RTA_DST | RTA_NETMASK;
     if rtm_type == RTM_ADD as u8 || route.gateway.is_some() {
         rtm_addrs |= RTA_GATEWAY;
@@ -230,6 +246,11 @@ fn add_or_del_route_req(route: &Route, rtm_type: u8) -> io::Result<m_rtmsg> {
     }
     #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
     if route.pref_source.is_some() {
+        rtm_addrs |= RTA_IFA;
+    }
+    // See lo0's address in route_to_m_rtmsg
+    #[cfg(target_os = "macos")]
+    if rtm_type == RTM_ADD as u8 && route.kind != RouteKind::Unicast {
         rtm_addrs |= RTA_IFA;
     }
     let mut rtmsg: m_rtmsg = route_to_m_rtmsg(rtm_type, route)?;
@@ -268,6 +289,14 @@ fn route_to_m_rtmsg(_rtm_type: u8, value: &Route) -> io::Result<m_rtmsg> {
         attrs: [0u8; 512],
     };
     let if_index = value.get_index();
+    // The loopback driver is what refuses traffic for reject and blackhole
+    // routes, so they are added through lo0.
+    #[cfg(target_os = "macos")]
+    let if_index = if _rtm_type == RTM_ADD as u8 && value.kind != RouteKind::Unicast {
+        Some(crate::if_name_to_index("lo0")?)
+    } else {
+        if_index
+    };
     let mut attr_offset = put_ip_addr(0, &mut rtmsg, value.destination)?;
 
     if let Some(gateway) = value.gateway {
@@ -285,6 +314,18 @@ fn route_to_m_rtmsg(_rtm_type: u8, value: &Route) -> io::Result<m_rtmsg> {
     #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
     if let Some(source_addr) = value.pref_source {
         attr_offset = put_ip_addr(attr_offset, &mut rtmsg, source_addr)?;
+    }
+
+    // The kernel binds a host route to the peer of a point-to-point interface
+    // to that interface, where nothing refuses the traffic. Naming lo0's
+    // address (RTA_IFA, like `route add -ifa`) binds it to lo0 again.
+    #[cfg(target_os = "macos")]
+    if _rtm_type == RTM_ADD as u8 && value.kind != RouteKind::Unicast {
+        let lo0_addr = match value.destination {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        };
+        attr_offset = put_ip_addr(attr_offset, &mut rtmsg, lo0_addr)?;
     }
 
     if let Some(if_index) = if_index {
@@ -384,18 +425,40 @@ fn deserialize_res_change<F: FnMut(RouteChange)>(mut add_fn: F, msgs_buf: &[u8])
 
 fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::Result<()> {
     let mut offset = 0;
-    while offset + std::mem::size_of::<rt_msghdr>() <= msgs_buf.len() {
+    while offset < msgs_buf.len() {
         let buf = &msgs_buf[offset..];
-
-        let rt_hdr = unsafe { &*buf.as_ptr().cast::<rt_msghdr>() };
-        let msg_len = rt_hdr.rtm_msglen as usize;
-        if msg_len == 0 {
-            break;
+        // Routing socket messages share only this four-byte prefix. Interface
+        // notifications have a different header: on macOS, ifi_mtu occupies
+        // the same offset as rt_msghdr::rtm_errno.
+        if buf.len() < 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated routing message prefix",
+            ));
+        }
+        let msg_len = u16::from_ne_bytes([buf[0], buf[1]]) as usize;
+        if msg_len < 4 || msg_len > buf.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid routing message length",
+            ));
         }
         offset += msg_len;
-        if rt_hdr.rtm_version as u32 != RTM_VERSION {
+        if buf[2] as u32 != RTM_VERSION {
             continue;
         }
+        #[cfg(target_os = "macos")]
+        if !matches!(buf[3] as u32, RTM_ADD | RTM_DELETE | RTM_CHANGE | RTM_GET) {
+            continue;
+        }
+        if msg_len < std::mem::size_of::<rt_msghdr>() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated route header",
+            ));
+        }
+        // The socket buffer (and individual messages) need not be aligned.
+        let rt_hdr = unsafe { std::ptr::read_unaligned(buf.as_ptr().cast::<rt_msghdr>()) };
         #[cfg(target_os = "openbsd")]
         if (rt_hdr.rtm_flags as u32 & (RTF_GATEWAY | RTF_STATIC | RTF_LLINFO)) == 0 {
             continue;
@@ -411,6 +474,12 @@ fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::
             continue;
         }
 
+        // Other message types (e.g. RTM_IFINFO) have a different header layout
+        match rt_hdr.rtm_type as u32 {
+            RTM_ADD | RTM_DELETE | RTM_CHANGE | RTM_GET => {}
+            _ => continue,
+        }
+
         if rt_hdr.rtm_errno != 0 {
             return Err(io::Error::from_raw_os_error(rt_hdr.rtm_errno));
         }
@@ -422,7 +491,7 @@ fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::
 
         let rt_msg = &buf[std::mem::size_of::<rt_msghdr>()..msg_len];
 
-        if let Some(route) = message_to_route(rt_hdr, rt_msg) {
+        if let Some(route) = message_to_route(&rt_hdr, rt_msg) {
             add_fn(rt_hdr.rtm_type as u32, route);
         }
     }
@@ -444,36 +513,41 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
     // function `get_rtaddrs()`
     let mut route_addresses = [None; RTAX_MAX as usize];
     let mut cur_pos = 0;
+    let mut netmask_raw: Option<&[u8]> = None;
     for (idx, item) in route_addresses
         .iter_mut()
         .enumerate()
         .take(RTAX_MAX as usize)
     {
         if hdr.rtm_addrs & (1 << idx) != 0 {
-            let buf = &msg[cur_pos..];
-            if buf.len() < std::mem::size_of::<sockaddr>() {
-                continue;
+            let buf = match msg.get(cur_pos..) {
+                Some(buf) if !buf.is_empty() => buf,
+                _ => break,
+            };
+            let sa_len = buf[0] as usize;
+            if idx == RTAX_NETMASK as usize {
+                // Netmasks are truncated to their significant bytes, so they can be
+                // shorter than a full sockaddr; keep only the bytes actually present.
+                netmask_raw = Some(&buf[..sa_len.min(buf.len())]);
+            } else if buf.len() >= std::mem::size_of::<sockaddr>() && buf.len() >= sa_len {
+                *item = Some(unsafe { &*(buf.as_ptr() as *const sockaddr) });
             }
-            assert!(buf.len() >= std::mem::size_of::<sockaddr>());
-            let sa: &sockaddr = unsafe { &*(buf.as_ptr() as *const sockaddr) };
-            assert!(buf.len() >= sa.sa_len as usize);
-            *item = Some(sa);
 
             // NetBSD uses the same alignment as FreeBSD and OpenBSD
             #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
             {
-                cur_pos += sa_size(sa.sa_len as usize);
+                cur_pos += sa_size(sa_len);
             }
             #[cfg(target_os = "macos")]
             {
                 // see ROUNDUP() macro in the route.c file linked above.
                 // The len needs to be a multiple of 4bytes
-                let aligned_len = if sa.sa_len == 0 {
+                let aligned_len = if sa_len == 0 {
                     4
                 } else {
-                    ((sa.sa_len - 1) | 0x3) + 1
+                    ((sa_len - 1) | 0x3) + 1
                 };
-                cur_pos += aligned_len as usize;
+                cur_pos += aligned_len;
             }
         }
     }
@@ -513,24 +587,27 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
 
     // check if message has netmask
     if hdr.rtm_addrs & (1 << RTAX_NETMASK) != 0 {
-        match route_addresses[RTAX_NETMASK as usize] {
-            None => prefix = 0,
-            // Yes, apparently a 0 prefixlen is encoded as having an sa_len of 0
-            // (at least in some cases).
-            Some(sa) if sa.sa_len == 0 => prefix = 0,
-            Some(sa) => match destination {
-                IpAddr::V4(_) => {
-                    let mask_sa: &sockaddr_in = unsafe { mem::transmute(sa) };
-                    prefix = u32::from_be(mask_sa.sin_addr.s_addr).leading_ones() as u8;
+        // A missing/zero-length netmask encodes a 0 prefixlen. Truncated bytes are zeros.
+        let raw = netmask_raw.unwrap_or(&[]);
+        let mut mask = [0u8; 16];
+        match destination {
+            IpAddr::V4(_) => {
+                // sockaddr_in: sin_addr is at offset 4
+                if raw.len() > 4 {
+                    let n = (raw.len() - 4).min(4);
+                    mask[..n].copy_from_slice(&raw[4..4 + n]);
                 }
-                IpAddr::V6(_) => {
-                    let mask_sa: &sockaddr_in6 = unsafe { mem::transmute(sa) };
-                    // sin6_addr.__u6_addr is a union that represents the 16 v6 bytes either as
-                    // 16 u8's or 16 u16's or 4 u32's. So we need the unsafe here because of the union
-                    prefix = u128::from_be_bytes(unsafe { mask_sa.sin6_addr.__u6_addr.__u6_addr8 })
-                        .leading_ones() as u8;
+                prefix =
+                    u32::from_be_bytes([mask[0], mask[1], mask[2], mask[3]]).leading_ones() as u8;
+            }
+            IpAddr::V6(_) => {
+                // sockaddr_in6: sin6_addr is at offset 8
+                if raw.len() > 8 {
+                    let n = (raw.len() - 8).min(16);
+                    mask[..n].copy_from_slice(&raw[8..8 + n]);
                 }
-            },
+                prefix = u128::from_be_bytes(mask).leading_ones() as u8;
+            }
         }
     }
     #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
@@ -545,6 +622,22 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
     #[cfg(target_os = "macos")]
     let if_scope = hdr.rtm_flags as u32 & RTF_IFSCOPE != 0;
 
+    // The loopback driver checks for blackhole before reject
+    #[cfg(target_os = "macos")]
+    let kind = if hdr.rtm_flags as u32 & RTF_BLACKHOLE != 0 {
+        RouteKind::Blackhole
+    } else if hdr.rtm_flags as u32 & RTF_REJECT != 0 {
+        RouteKind::Unreachable
+    } else {
+        RouteKind::Unicast
+    };
+    // A reject or blackhole route forwards nothing, so its gateway is no next
+    // hop; dropping it lets the listed route pass check() and be deleted
+    #[cfg(target_os = "macos")]
+    if kind != RouteKind::Unicast {
+        gateway = None;
+    }
+
     Some(Route {
         destination,
         prefix,
@@ -555,6 +648,8 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
         if_index: Some(hdr.rtm_index as u32),
         #[cfg(target_os = "macos")]
         if_scope,
+        #[cfg(target_os = "macos")]
+        kind,
     })
 }
 
@@ -627,7 +722,7 @@ impl From<Ipv4Addr> for sockaddr_in {
             sin_addr: in_addr {
                 s_addr: u32::from_ne_bytes(ip.octets()),
             },
-            sin_zero: [0i8; 8],
+            sin_zero: [0; 8],
         }
     }
 }
@@ -657,4 +752,365 @@ fn create_route_socket() -> io::Result<UnixStream> {
     }
     let route_fd = unsafe { UnixStream::from_raw_fd(fd) };
     Ok(route_fd)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    const REJECT_KINDS: [(RouteKind, u32); 2] = [
+        (RouteKind::Unreachable, RTF_REJECT),
+        (RouteKind::Blackhole, RTF_BLACKHOLE),
+    ];
+
+    /// A socket address in a route message.
+    #[derive(Debug, PartialEq)]
+    enum Addr {
+        Ip(IpAddr),
+        Link(u32),
+    }
+
+    fn ip(addr: &str) -> Addr {
+        Addr::Ip(addr.parse().unwrap())
+    }
+
+    fn v4_route() -> Route {
+        Route::new("198.51.100.0".parse().unwrap(), 24)
+    }
+
+    fn v6_route() -> Route {
+        Route::new("::".parse().unwrap(), 1)
+    }
+
+    fn lo0_index() -> u32 {
+        unsafe { libc::if_nametoindex(c"lo0".as_ptr()) }
+    }
+
+    /// An interface other than lo0.
+    fn other_if_index() -> u32 {
+        (1..256)
+            .find(|&i| i != lo0_index() && crate::if_index_to_name(i).is_ok())
+            .expect("no interface besides lo0")
+    }
+
+    fn req(route: &Route, rtm_type: u32) -> m_rtmsg {
+        add_or_del_route_req(route, rtm_type as u8).unwrap()
+    }
+
+    /// The socket addresses that `rtm_addrs` says the message carries,
+    /// decoded by hand the way the kernel reads them.
+    fn addrs(msg: &m_rtmsg) -> Vec<Addr> {
+        let body = &msg.slice()[mem::size_of::<rt_msghdr>()..];
+        let mut addrs = vec![];
+        let mut pos = 0;
+        for _ in 0..msg.hdr.rtm_addrs.count_ones() {
+            assert!(pos < body.len(), "rtm_addrs lists a missing address");
+            let sa = &body[pos..pos + body[pos] as usize];
+            addrs.push(match sa[1] as u32 {
+                AF_INET => Addr::Ip(IpAddr::from(<[u8; 4]>::try_from(&sa[4..8]).unwrap())),
+                AF_INET6 => Addr::Ip(IpAddr::from(<[u8; 16]>::try_from(&sa[8..24]).unwrap())),
+                AF_LINK => Addr::Link(u16::from_ne_bytes([sa[2], sa[3]]) as u32),
+                family => panic!("unexpected address family {family}"),
+            });
+            pos += sa.len();
+        }
+        addrs
+    }
+
+    /// Parses a route the way the kernel reports one on lo0, with the given
+    /// flags and gateway (a link address for lo0 when `None`).
+    fn parse(flags: u32, gateway: Option<&str>) -> Route {
+        parse_on(lo0_index(), flags, gateway)
+    }
+
+    /// Like [`parse`], for a route on the interface `if_index`.
+    fn parse_on(if_index: u32, flags: u32, gateway: Option<&str>) -> Route {
+        let mut msg = m_rtmsg {
+            hdr: rt_msghdr::default(),
+            attrs: [0u8; 512],
+        };
+        let mut offset = put_ip_addr(0, &mut msg, "198.51.100.0".parse().unwrap()).unwrap();
+        offset = match gateway {
+            Some(gateway) => put_ip_addr(offset, &mut msg, gateway.parse().unwrap()),
+            None => put_ifa_addr(offset, &mut msg, if_index),
+        }
+        .unwrap();
+        offset = put_ip_addr(offset, &mut msg, "255.255.255.0".parse().unwrap()).unwrap();
+        msg.hdr.rtm_addrs = (RTA_DST | RTA_GATEWAY | RTA_NETMASK) as i32;
+        msg.hdr.rtm_flags = flags as i32;
+        msg.hdr.rtm_index = if_index as u_short;
+        message_to_route(&msg.hdr, &msg.attrs[..offset]).unwrap()
+    }
+
+    #[test]
+    fn unicast_messages_unchanged() {
+        let route = v4_route().with_gateway("192.0.2.1".parse().unwrap());
+        assert_eq!(route.kind(), RouteKind::Unicast);
+        let msg = req(&route, RTM_ADD);
+        assert_eq!(msg.hdr.rtm_flags as u32, RTF_STATIC | RTF_UP | RTF_GATEWAY);
+        assert_eq!(
+            addrs(&msg),
+            vec![ip("198.51.100.0"), ip("192.0.2.1"), ip("255.255.255.0")]
+        );
+
+        let other = other_if_index();
+        let msg = req(&v6_route().with_if_index(other), RTM_ADD);
+        assert_eq!(msg.hdr.rtm_flags as u32, RTF_STATIC | RTF_UP);
+        assert_eq!(addrs(&msg), vec![ip("::"), Addr::Link(other), ip("8000::")]);
+    }
+
+    #[test]
+    fn kind_sets_route_flag() {
+        for (kind, flag) in REJECT_KINDS {
+            for route in [v4_route(), v6_route()] {
+                for rtm_type in [RTM_ADD, RTM_DELETE] {
+                    let msg = req(&route.clone().with_kind(kind), rtm_type);
+                    assert_eq!(
+                        msg.hdr.rtm_flags as u32,
+                        RTF_STATIC | RTF_UP | flag,
+                        "{kind:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_unicast_add_points_at_lo0() {
+        let lo0 = lo0_index();
+        for (kind, _) in REJECT_KINDS {
+            for (route, mask, lo0_addr) in [
+                (v4_route(), "255.255.255.0", "127.0.0.1"),
+                (v6_route(), "8000::", "::1"),
+            ] {
+                for route in [
+                    route.clone(),
+                    route.clone().with_if_index(other_if_index()),
+                    route.with_if_name("lo0".to_string()),
+                ] {
+                    let route = route.with_kind(kind);
+                    let msg = req(&route, RTM_ADD);
+                    assert_eq!(
+                        msg.hdr.rtm_addrs as u32,
+                        RTA_DST | RTA_GATEWAY | RTA_NETMASK | RTA_IFA
+                    );
+                    assert_eq!(
+                        addrs(&msg),
+                        vec![
+                            Addr::Ip(route.destination),
+                            Addr::Link(lo0),
+                            ip(mask),
+                            ip(lo0_addr)
+                        ],
+                        "{route}"
+                    );
+                    assert_eq!(msg.hdr.rtm_index, 0);
+                }
+            }
+        }
+    }
+
+    /// The kernel binds a host route to the peer of a point-to-point interface
+    /// to that interface unless the message names lo0's address.
+    #[test]
+    fn non_unicast_host_add_names_lo0_address() {
+        let lo0 = lo0_index();
+        for (kind, flag) in REJECT_KINDS {
+            for (dst, prefix, mask, lo0_addr) in [
+                ("198.51.100.7", 32, "255.255.255.255", "127.0.0.1"),
+                (
+                    "2001:db8::7",
+                    128,
+                    "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+                    "::1",
+                ),
+            ] {
+                let route = Route::new(dst.parse().unwrap(), prefix).with_kind(kind);
+                let msg = req(&route, RTM_ADD);
+                assert_eq!(
+                    msg.hdr.rtm_flags as u32,
+                    RTF_STATIC | RTF_UP | RTF_HOST | flag,
+                    "{route}"
+                );
+                assert_eq!(
+                    addrs(&msg),
+                    vec![ip(dst), Addr::Link(lo0), ip(mask), ip(lo0_addr)],
+                    "{route}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_non_unicast_add_names_an_interface_address() {
+        let msg = req(&v4_route().with_if_name("lo0".to_string()), RTM_ADD);
+        assert_eq!(
+            msg.hdr.rtm_addrs as u32,
+            RTA_DST | RTA_GATEWAY | RTA_NETMASK
+        );
+        for (kind, _) in REJECT_KINDS {
+            let msg = req(&v4_route().with_kind(kind), RTM_DELETE);
+            assert_eq!(msg.hdr.rtm_addrs as u32, RTA_DST | RTA_NETMASK);
+        }
+    }
+
+    #[test]
+    fn check_rejects_gateway_on_non_unicast() {
+        for (kind, _) in REJECT_KINDS {
+            for (route, gateway) in [(v4_route(), "127.0.0.1"), (v6_route(), "::1")] {
+                let route = route.with_kind(kind).with_gateway(gateway.parse().unwrap());
+                let err = route.check().unwrap_err();
+                assert_eq!(err.to_string(), "only unicast routes can have a gateway");
+                assert!(add_or_del_route_req(&route, RTM_ADD as u8).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn add_rejects_if_scope_on_non_unicast() {
+        for (kind, _) in REJECT_KINDS {
+            let route = v6_route()
+                .with_kind(kind)
+                .with_if_name("lo0".to_string())
+                .with_if_scope(true);
+            let Err(err) = add_or_del_route_req(&route, RTM_ADD as u8) else {
+                panic!("{kind:?} route added with if_scope");
+            };
+            assert_eq!(err.to_string(), "only unicast routes can use if_scope");
+        }
+    }
+
+    #[test]
+    fn listed_scoped_route_can_be_deleted() {
+        let other = other_if_index();
+        for (kind, flag) in REJECT_KINDS {
+            let listed = parse_on(other, RTF_UP | RTF_STATIC | RTF_IFSCOPE | flag, None);
+            assert!(listed.if_scope());
+            let msg = req(&listed, RTM_DELETE);
+            assert_eq!(
+                msg.hdr.rtm_flags as u32,
+                RTF_STATIC | RTF_UP | RTF_IFSCOPE | flag,
+                "{kind:?}"
+            );
+            assert_eq!(msg.hdr.rtm_index as u32, other);
+        }
+    }
+
+    #[test]
+    fn parse_reject_and_blackhole_flags() {
+        let kinds = [
+            (RTF_REJECT, RouteKind::Unreachable),
+            (RTF_BLACKHOLE, RouteKind::Blackhole),
+            // The loopback driver checks for blackhole first
+            (RTF_REJECT | RTF_BLACKHOLE, RouteKind::Blackhole),
+        ];
+        for (flag, kind) in kinds {
+            for gateway in [None, Some("127.0.0.1")] {
+                let route = parse(RTF_UP | RTF_STATIC | flag, gateway);
+                assert_eq!(route.kind(), kind, "{flag:#x} {gateway:?}");
+                assert_eq!(route.gateway(), None);
+                assert_eq!(route.if_index(), Some(lo0_index()));
+            }
+        }
+    }
+
+    #[test]
+    fn parse_unicast_keeps_gateway() {
+        let route = parse(RTF_UP | RTF_STATIC | RTF_GATEWAY, Some("192.0.2.1"));
+        assert_eq!(route.kind(), RouteKind::Unicast);
+        assert_eq!(route.gateway(), Some("192.0.2.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn listed_route_can_be_deleted() {
+        for (kind, flag) in REJECT_KINDS {
+            let listed = parse(RTF_UP | RTF_STATIC | RTF_GATEWAY | flag, Some("127.0.0.1"));
+            let msg = req(&listed, RTM_DELETE);
+            assert_eq!(
+                msg.hdr.rtm_flags as u32,
+                RTF_STATIC | RTF_UP | flag,
+                "{kind:?}"
+            );
+            assert_eq!(addrs(&msg), vec![ip("198.51.100.0"), ip("255.255.255.0")]);
+        }
+    }
+
+    #[test]
+    fn display_shows_kind_only_when_not_unicast() {
+        let route = v6_route();
+        assert_eq!(
+            route.to_string(),
+            "Route { destination: ::/1, gateway: None, if_index: None, if_name: None }"
+        );
+        assert_eq!(
+            route.with_kind(RouteKind::Blackhole).to_string(),
+            "Route { destination: ::/1, gateway: None, if_index: None, if_name: None, kind: Blackhole }"
+        );
+    }
+}
+#[cfg(all(test, target_os = "macos"))]
+mod notification_regression_tests {
+    use super::*;
+
+    fn interface_message(mtu: u32) -> Vec<u8> {
+        let mut bytes = vec![0u8; std::mem::size_of::<libc::if_msghdr>()];
+        let len = bytes.len() as u16;
+        bytes[..2].copy_from_slice(&len.to_ne_bytes());
+        bytes[2] = RTM_VERSION as u8;
+        bytes[3] = libc::RTM_IFINFO as u8;
+        let mtu_offset = std::mem::offset_of!(libc::if_msghdr, ifm_data)
+            + std::mem::offset_of!(libc::if_data, ifi_mtu);
+        assert_eq!(mtu_offset, std::mem::offset_of!(rt_msghdr, rtm_errno));
+        bytes[mtu_offset..mtu_offset + 4].copy_from_slice(&mtu.to_ne_bytes());
+        bytes
+    }
+
+    #[test]
+    fn interface_mtu_is_not_an_errno() {
+        for mtu in [1500, 9000] {
+            let mut changes = Vec::new();
+            deserialize_res_change(|change| changes.push(change), &interface_message(mtu)).unwrap();
+            assert!(changes.is_empty());
+        }
+    }
+    fn route_error_message(error: i32) -> Vec<u8> {
+        let mut bytes = vec![0; std::mem::size_of::<rt_msghdr>()];
+        let len = bytes.len() as u16;
+        bytes[..2].copy_from_slice(&len.to_ne_bytes());
+        bytes[2] = RTM_VERSION as u8;
+        bytes[3] = RTM_GET as u8;
+        let offset = std::mem::offset_of!(rt_msghdr, rtm_errno);
+        bytes[offset..offset + 4].copy_from_slice(&error.to_ne_bytes());
+        bytes
+    }
+
+    #[test]
+    fn interface_notifications_do_not_hide_route_errors() {
+        let mut bytes = interface_message(1500);
+        bytes.extend_from_slice(&route_error_message(libc::EACCES));
+        let error = deserialize_res_change(|_| panic!("unexpected route"), &bytes).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EACCES));
+    }
+
+    #[test]
+    fn short_address_notification_does_not_stop_following_messages() {
+        let mut bytes = vec![4, 0, RTM_VERSION as u8, libc::RTM_NEWADDR as u8];
+        bytes[..2].copy_from_slice(&4u16.to_ne_bytes());
+        bytes.extend_from_slice(&route_error_message(libc::EACCES));
+        let error = deserialize_res_change(|_| panic!("unexpected route"), &bytes).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EACCES));
+    }
+
+    #[test]
+    fn malformed_message_lengths_return_errors() {
+        for bytes in [
+            vec![1],
+            vec![0, 0, 0, 0],
+            vec![255, 255, 0, 0],
+            vec![4, 0, RTM_VERSION as u8, RTM_GET as u8],
+        ] {
+            let error = deserialize_res_change(|_| {}, &bytes).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+    }
 }

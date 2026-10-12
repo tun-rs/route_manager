@@ -13,7 +13,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
-use crate::{Route, RouteChange};
+use crate::{Route, RouteChange, RouteKind};
 #[cfg(any(feature = "async", feature = "async_io"))]
 pub(crate) mod async_route;
 #[cfg(any(feature = "async", feature = "async_io"))]
@@ -320,6 +320,12 @@ impl TryFrom<RouteMessage> for Route {
             }
         };
         let mut route = Route::new(destination, prefix).with_table(table);
+        match msg.header.kind {
+            RouteType::Unreachable => route = route.with_kind(RouteKind::Unreachable),
+            RouteType::BlackHole => route = route.with_kind(RouteKind::Blackhole),
+            RouteType::Prohibit => route = route.with_kind(RouteKind::Prohibit),
+            _ => {}
+        }
         if let Some(source) = source {
             route = route.with_source(source, source_prefix);
         }
@@ -352,18 +358,27 @@ impl TryFrom<&Route> for RouteMessage {
         route_msg.header.destination_prefix_length = route.prefix;
         route_msg.header.protocol = RouteProtocol::Static;
         route_msg.header.scope = RouteScope::Universe;
-        route_msg.header.kind = RouteType::Unicast;
+        route_msg.header.kind = match route.kind {
+            RouteKind::Unicast => RouteType::Unicast,
+            RouteKind::Unreachable => RouteType::Unreachable,
+            RouteKind::Blackhole => RouteType::BlackHole,
+            RouteKind::Prohibit => RouteType::Prohibit,
+        };
         route_msg.header.table = route.table;
         route_msg
             .attributes
             .push(RouteAttribute::Destination(route.destination.into()));
-        if let Some(gateway) = route.gateway {
-            route_msg
-                .attributes
-                .push(RouteAttribute::Gateway(gateway.into()));
-        }
-        if let Some(if_index) = route.get_index() {
-            route_msg.attributes.push(RouteAttribute::Oif(if_index));
+        // Only unicast routes have a next hop. When adding the other kinds,
+        // IPv4 rejects a gateway or interface with EINVAL and IPv6 ignores them.
+        if route.kind == RouteKind::Unicast {
+            if let Some(gateway) = route.gateway {
+                route_msg
+                    .attributes
+                    .push(RouteAttribute::Gateway(gateway.into()));
+            }
+            if let Some(if_index) = route.get_index() {
+                route_msg.attributes.push(RouteAttribute::Oif(if_index));
+            }
         }
         if let Some(metric) = route.metric {
             route_msg.attributes.push(RouteAttribute::Priority(metric));
@@ -441,5 +456,216 @@ fn route_address_to_ip(addr: RouteAddress) -> Option<IpAddr> {
         RouteAddress::Inet(ip) => Some(IpAddr::V4(ip)),
         RouteAddress::Inet6(ip) => Some(IpAddr::V6(ip)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REJECT_KINDS: [(RouteKind, RouteType); 3] = [
+        (RouteKind::Unreachable, RouteType::Unreachable),
+        (RouteKind::Blackhole, RouteType::BlackHole),
+        (RouteKind::Prohibit, RouteType::Prohibit),
+    ];
+
+    fn v4_route() -> Route {
+        Route::new("198.51.100.0".parse().unwrap(), 24)
+    }
+
+    fn v6_route() -> Route {
+        Route::new("::".parse().unwrap(), 1)
+    }
+
+    fn to_msg(route: &Route) -> RouteMessage {
+        RouteMessage::try_from(route).unwrap()
+    }
+
+    fn has_oif(msg: &RouteMessage) -> bool {
+        msg.attributes
+            .iter()
+            .any(|a| matches!(a, RouteAttribute::Oif(_)))
+    }
+
+    fn expected_msg(
+        route: &Route,
+        kind: RouteType,
+        attributes: Vec<RouteAttribute>,
+    ) -> RouteMessage {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = if route.destination.is_ipv4() {
+            AddressFamily::Inet
+        } else {
+            AddressFamily::Inet6
+        };
+        msg.header.destination_prefix_length = route.prefix;
+        msg.header.protocol = RouteProtocol::Static;
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = kind;
+        msg.attributes = attributes;
+        msg
+    }
+
+    fn parse(family: AddressFamily, destination: IpAddr, kind: RouteType) -> Route {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = family;
+        msg.header.destination_prefix_length = 1;
+        msg.header.kind = kind;
+        msg.attributes
+            .push(RouteAttribute::Destination(destination.into()));
+        msg.attributes.push(RouteAttribute::Oif(1));
+        Route::try_from(msg).unwrap()
+    }
+
+    #[test]
+    fn unicast_is_default_and_message_unchanged() {
+        let route = v4_route()
+            .with_gateway("192.0.2.1".parse().unwrap())
+            .with_if_index(1)
+            .with_metric(100);
+        assert_eq!(route.kind(), RouteKind::Unicast);
+
+        let expected = expected_msg(
+            &route,
+            RouteType::Unicast,
+            vec![
+                RouteAttribute::Destination(route.destination.into()),
+                RouteAttribute::Gateway(IpAddr::from([192, 0, 2, 1]).into()),
+                RouteAttribute::Oif(1),
+                RouteAttribute::Priority(100),
+            ],
+        );
+        assert_eq!(to_msg(&route), expected);
+    }
+
+    #[test]
+    fn kind_maps_to_route_type() {
+        for (kind, route_type) in REJECT_KINDS {
+            for route in [v4_route(), v6_route()] {
+                let msg = to_msg(&route.with_kind(kind));
+                assert_eq!(msg.header.kind, route_type, "{kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn non_unicast_omits_next_hop() {
+        for (kind, route_type) in REJECT_KINDS {
+            for route in [
+                v4_route().with_if_index(1),
+                v6_route().with_if_index(1),
+                v6_route().with_if_name("lo".to_string()),
+            ] {
+                let route = route.with_kind(kind).with_metric(1024);
+                let expected = expected_msg(
+                    &route,
+                    route_type,
+                    vec![
+                        RouteAttribute::Destination(route.destination.into()),
+                        RouteAttribute::Priority(1024),
+                    ],
+                );
+                assert_eq!(to_msg(&route), expected, "{route}");
+            }
+        }
+    }
+
+    #[test]
+    fn check_rejects_gateway_on_non_unicast() {
+        for (kind, _) in REJECT_KINDS {
+            for (route, gateway) in [(v4_route(), "192.0.2.1"), (v6_route(), "fe80::1")] {
+                let route = route.with_kind(kind).with_gateway(gateway.parse().unwrap());
+                let err = route.check().unwrap_err();
+                assert_eq!(err.to_string(), "only unicast routes can have a gateway");
+                assert!(RouteMessage::try_from(&route).is_err());
+            }
+
+            assert!(v6_route().with_kind(kind).with_if_index(1).check().is_ok());
+        }
+    }
+
+    #[test]
+    fn parse_reject_route_types() {
+        for (kind, route_type) in REJECT_KINDS {
+            let route = parse(AddressFamily::Inet6, "::".parse().unwrap(), route_type);
+            assert_eq!(route.kind(), kind);
+            assert_eq!(route.if_index(), Some(1));
+
+            let route = parse(
+                AddressFamily::Inet,
+                "198.51.100.0".parse().unwrap(),
+                route_type,
+            );
+            assert_eq!(route.kind(), kind);
+        }
+    }
+
+    #[test]
+    fn parse_other_route_types_as_unicast() {
+        for route_type in [RouteType::Unicast, RouteType::Local, RouteType::Throw] {
+            let route = parse(AddressFamily::Inet6, "::".parse().unwrap(), route_type);
+            assert_eq!(route.kind(), RouteKind::Unicast, "{route_type:?}");
+        }
+    }
+
+    #[test]
+    fn round_trip_keeps_kind() {
+        let kinds = [
+            RouteKind::Unicast,
+            RouteKind::Unreachable,
+            RouteKind::Blackhole,
+            RouteKind::Prohibit,
+        ];
+        for kind in kinds {
+            for (route, source, pref_source) in [
+                (v4_route(), "192.0.2.0", "192.0.2.1"),
+                (v6_route(), "2001:db8::", "2001:db8::1"),
+            ] {
+                let route = route
+                    .with_table(254)
+                    .with_metric(42)
+                    .with_source(source.parse().unwrap(), 24)
+                    .with_pref_source(pref_source.parse().unwrap())
+                    .with_kind(kind);
+                let parsed = Route::try_from(to_msg(&route)).unwrap();
+                assert_eq!(parsed, route);
+                assert_eq!(parsed.kind(), kind);
+            }
+        }
+    }
+
+    #[test]
+    fn add_and_delete_requests_carry_kind() {
+        let route = v4_route()
+            .with_kind(RouteKind::Unreachable)
+            .with_if_index(1);
+        for req in [
+            add_route_req(&route).unwrap(),
+            delete_route_req(&route).unwrap(),
+        ] {
+            let packet = <NetlinkMessage<RouteNetlinkMessage>>::deserialize(&req).unwrap();
+            let msg = match packet.payload {
+                NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewRoute(msg))
+                | NetlinkPayload::InnerMessage(RouteNetlinkMessage::DelRoute(msg)) => msg,
+                other => panic!("unexpected payload {other:?}"),
+            };
+            assert_eq!(msg.header.kind, RouteType::Unreachable);
+            assert!(!has_oif(&msg));
+        }
+    }
+
+    #[test]
+    fn display_shows_kind_only_when_not_unicast() {
+        let route = v6_route();
+        assert_eq!(
+            route.to_string(),
+            "Route { destination: ::/1, gateway: None, if_index: None, if_name: None, \
+             metric: None, table: 0, source: None, pref_source: None }"
+        );
+        assert_eq!(
+            route.with_kind(RouteKind::Unreachable).to_string(),
+            "Route { destination: ::/1, gateway: None, if_index: None, if_name: None, \
+             metric: None, table: 0, source: None, kind: Unreachable, pref_source: None }"
+        );
     }
 }
