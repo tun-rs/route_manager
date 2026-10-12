@@ -425,18 +425,40 @@ fn deserialize_res_change<F: FnMut(RouteChange)>(mut add_fn: F, msgs_buf: &[u8])
 
 fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::Result<()> {
     let mut offset = 0;
-    while offset + std::mem::size_of::<rt_msghdr>() <= msgs_buf.len() {
+    while offset < msgs_buf.len() {
         let buf = &msgs_buf[offset..];
-
-        let rt_hdr = unsafe { &*buf.as_ptr().cast::<rt_msghdr>() };
-        let msg_len = rt_hdr.rtm_msglen as usize;
-        if msg_len == 0 {
-            break;
+        // Routing socket messages share only this four-byte prefix. Interface
+        // notifications have a different header: on macOS, ifi_mtu occupies
+        // the same offset as rt_msghdr::rtm_errno.
+        if buf.len() < 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated routing message prefix",
+            ));
+        }
+        let msg_len = u16::from_ne_bytes([buf[0], buf[1]]) as usize;
+        if msg_len < 4 || msg_len > buf.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid routing message length",
+            ));
         }
         offset += msg_len;
-        if rt_hdr.rtm_version as u32 != RTM_VERSION {
+        if buf[2] as u32 != RTM_VERSION {
             continue;
         }
+        #[cfg(target_os = "macos")]
+        if !matches!(buf[3] as u32, RTM_ADD | RTM_DELETE | RTM_CHANGE | RTM_GET) {
+            continue;
+        }
+        if msg_len < std::mem::size_of::<rt_msghdr>() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated route header",
+            ));
+        }
+        // The socket buffer (and individual messages) need not be aligned.
+        let rt_hdr = unsafe { std::ptr::read_unaligned(buf.as_ptr().cast::<rt_msghdr>()) };
         #[cfg(target_os = "openbsd")]
         if (rt_hdr.rtm_flags as u32 & (RTF_GATEWAY | RTF_STATIC | RTF_LLINFO)) == 0 {
             continue;
@@ -469,7 +491,7 @@ fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::
 
         let rt_msg = &buf[std::mem::size_of::<rt_msghdr>()..msg_len];
 
-        if let Some(route) = message_to_route(rt_hdr, rt_msg) {
+        if let Some(route) = message_to_route(&rt_hdr, rt_msg) {
             add_fn(rt_hdr.rtm_type as u32, route);
         }
     }
@@ -1024,5 +1046,71 @@ mod tests {
             route.with_kind(RouteKind::Blackhole).to_string(),
             "Route { destination: ::/1, gateway: None, if_index: None, if_name: None, kind: Blackhole }"
         );
+    }
+}
+#[cfg(all(test, target_os = "macos"))]
+mod notification_regression_tests {
+    use super::*;
+
+    fn interface_message(mtu: u32) -> Vec<u8> {
+        let mut bytes = vec![0u8; std::mem::size_of::<libc::if_msghdr>()];
+        let len = bytes.len() as u16;
+        bytes[..2].copy_from_slice(&len.to_ne_bytes());
+        bytes[2] = RTM_VERSION as u8;
+        bytes[3] = libc::RTM_IFINFO as u8;
+        let mtu_offset = std::mem::offset_of!(libc::if_msghdr, ifm_data)
+            + std::mem::offset_of!(libc::if_data, ifi_mtu);
+        assert_eq!(mtu_offset, std::mem::offset_of!(rt_msghdr, rtm_errno));
+        bytes[mtu_offset..mtu_offset + 4].copy_from_slice(&mtu.to_ne_bytes());
+        bytes
+    }
+
+    #[test]
+    fn interface_mtu_is_not_an_errno() {
+        for mtu in [1500, 9000] {
+            let mut changes = Vec::new();
+            deserialize_res_change(|change| changes.push(change), &interface_message(mtu)).unwrap();
+            assert!(changes.is_empty());
+        }
+    }
+    fn route_error_message(error: i32) -> Vec<u8> {
+        let mut bytes = vec![0; std::mem::size_of::<rt_msghdr>()];
+        let len = bytes.len() as u16;
+        bytes[..2].copy_from_slice(&len.to_ne_bytes());
+        bytes[2] = RTM_VERSION as u8;
+        bytes[3] = RTM_GET as u8;
+        let offset = std::mem::offset_of!(rt_msghdr, rtm_errno);
+        bytes[offset..offset + 4].copy_from_slice(&error.to_ne_bytes());
+        bytes
+    }
+
+    #[test]
+    fn interface_notifications_do_not_hide_route_errors() {
+        let mut bytes = interface_message(1500);
+        bytes.extend_from_slice(&route_error_message(libc::EACCES));
+        let error = deserialize_res_change(|_| panic!("unexpected route"), &bytes).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EACCES));
+    }
+
+    #[test]
+    fn short_address_notification_does_not_stop_following_messages() {
+        let mut bytes = vec![4, 0, RTM_VERSION as u8, libc::RTM_NEWADDR as u8];
+        bytes[..2].copy_from_slice(&4u16.to_ne_bytes());
+        bytes.extend_from_slice(&route_error_message(libc::EACCES));
+        let error = deserialize_res_change(|_| panic!("unexpected route"), &bytes).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EACCES));
+    }
+
+    #[test]
+    fn malformed_message_lengths_return_errors() {
+        for bytes in [
+            vec![1],
+            vec![0, 0, 0, 0],
+            vec![255, 255, 0, 0],
+            vec![4, 0, RTM_VERSION as u8, RTM_GET as u8],
+        ] {
+            let error = deserialize_res_change(|_| {}, &bytes).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
     }
 }
