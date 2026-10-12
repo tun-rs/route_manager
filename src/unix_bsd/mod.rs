@@ -452,6 +452,12 @@ fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::
             continue;
         }
 
+        // Other message types (e.g. RTM_IFINFO) have a different header layout
+        match rt_hdr.rtm_type as u32 {
+            RTM_ADD | RTM_DELETE | RTM_CHANGE | RTM_GET => {}
+            _ => continue,
+        }
+
         if rt_hdr.rtm_errno != 0 {
             return Err(io::Error::from_raw_os_error(rt_hdr.rtm_errno));
         }
@@ -485,36 +491,41 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
     // function `get_rtaddrs()`
     let mut route_addresses = [None; RTAX_MAX as usize];
     let mut cur_pos = 0;
+    let mut netmask_raw: Option<&[u8]> = None;
     for (idx, item) in route_addresses
         .iter_mut()
         .enumerate()
         .take(RTAX_MAX as usize)
     {
         if hdr.rtm_addrs & (1 << idx) != 0 {
-            let buf = &msg[cur_pos..];
-            if buf.len() < std::mem::size_of::<sockaddr>() {
-                continue;
+            let buf = match msg.get(cur_pos..) {
+                Some(buf) if !buf.is_empty() => buf,
+                _ => break,
+            };
+            let sa_len = buf[0] as usize;
+            if idx == RTAX_NETMASK as usize {
+                // Netmasks are truncated to their significant bytes, so they can be
+                // shorter than a full sockaddr; keep only the bytes actually present.
+                netmask_raw = Some(&buf[..sa_len.min(buf.len())]);
+            } else if buf.len() >= std::mem::size_of::<sockaddr>() && buf.len() >= sa_len {
+                *item = Some(unsafe { &*(buf.as_ptr() as *const sockaddr) });
             }
-            assert!(buf.len() >= std::mem::size_of::<sockaddr>());
-            let sa: &sockaddr = unsafe { &*(buf.as_ptr() as *const sockaddr) };
-            assert!(buf.len() >= sa.sa_len as usize);
-            *item = Some(sa);
 
             // NetBSD uses the same alignment as FreeBSD and OpenBSD
             #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
             {
-                cur_pos += sa_size(sa.sa_len as usize);
+                cur_pos += sa_size(sa_len);
             }
             #[cfg(target_os = "macos")]
             {
                 // see ROUNDUP() macro in the route.c file linked above.
                 // The len needs to be a multiple of 4bytes
-                let aligned_len = if sa.sa_len == 0 {
+                let aligned_len = if sa_len == 0 {
                     4
                 } else {
-                    ((sa.sa_len - 1) | 0x3) + 1
+                    ((sa_len - 1) | 0x3) + 1
                 };
-                cur_pos += aligned_len as usize;
+                cur_pos += aligned_len;
             }
         }
     }
@@ -554,24 +565,27 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
 
     // check if message has netmask
     if hdr.rtm_addrs & (1 << RTAX_NETMASK) != 0 {
-        match route_addresses[RTAX_NETMASK as usize] {
-            None => prefix = 0,
-            // Yes, apparently a 0 prefixlen is encoded as having an sa_len of 0
-            // (at least in some cases).
-            Some(sa) if sa.sa_len == 0 => prefix = 0,
-            Some(sa) => match destination {
-                IpAddr::V4(_) => {
-                    let mask_sa: &sockaddr_in = unsafe { mem::transmute(sa) };
-                    prefix = u32::from_be(mask_sa.sin_addr.s_addr).leading_ones() as u8;
+        // A missing/zero-length netmask encodes a 0 prefixlen. Truncated bytes are zeros.
+        let raw = netmask_raw.unwrap_or(&[]);
+        let mut mask = [0u8; 16];
+        match destination {
+            IpAddr::V4(_) => {
+                // sockaddr_in: sin_addr is at offset 4
+                if raw.len() > 4 {
+                    let n = (raw.len() - 4).min(4);
+                    mask[..n].copy_from_slice(&raw[4..4 + n]);
                 }
-                IpAddr::V6(_) => {
-                    let mask_sa: &sockaddr_in6 = unsafe { mem::transmute(sa) };
-                    // sin6_addr.__u6_addr is a union that represents the 16 v6 bytes either as
-                    // 16 u8's or 16 u16's or 4 u32's. So we need the unsafe here because of the union
-                    prefix = u128::from_be_bytes(unsafe { mask_sa.sin6_addr.__u6_addr.__u6_addr8 })
-                        .leading_ones() as u8;
+                prefix =
+                    u32::from_be_bytes([mask[0], mask[1], mask[2], mask[3]]).leading_ones() as u8;
+            }
+            IpAddr::V6(_) => {
+                // sockaddr_in6: sin6_addr is at offset 8
+                if raw.len() > 8 {
+                    let n = (raw.len() - 8).min(16);
+                    mask[..n].copy_from_slice(&raw[8..8 + n]);
                 }
-            },
+                prefix = u128::from_be_bytes(mask).leading_ones() as u8;
+            }
         }
     }
     #[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
