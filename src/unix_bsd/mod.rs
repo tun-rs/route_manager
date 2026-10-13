@@ -222,8 +222,7 @@ fn add_or_del_route_req(route: &Route, rtm_type: u8) -> io::Result<m_rtmsg> {
         rtm_flags |= RTF_IFSCOPE;
     }
 
-    // These are added through lo0 (see route_to_m_rtmsg), so they cannot be
-    // scoped to the caller's interface
+    // Non-unicast routes are added unscoped
     #[cfg(target_os = "macos")]
     if rtm_type == RTM_ADD as u8 && route.kind != RouteKind::Unicast && route.if_scope {
         return Err(io::Error::other("only unicast routes can use if_scope"));
@@ -250,7 +249,7 @@ fn add_or_del_route_req(route: &Route, rtm_type: u8) -> io::Result<m_rtmsg> {
     }
     // See lo0's address in route_to_m_rtmsg
     #[cfg(target_os = "macos")]
-    if rtm_type == RTM_ADD as u8 && route.kind != RouteKind::Unicast {
+    if rtm_type == RTM_ADD as u8 && route.kind != RouteKind::Unicast && route.gateway.is_none() {
         rtm_addrs |= RTA_IFA;
     }
     let mut rtmsg: m_rtmsg = route_to_m_rtmsg(rtm_type, route)?;
@@ -290,9 +289,13 @@ fn route_to_m_rtmsg(_rtm_type: u8, value: &Route) -> io::Result<m_rtmsg> {
     };
     let if_index = value.get_index();
     // The loopback driver is what refuses traffic for reject and blackhole
-    // routes, so they are added through lo0.
+    // routes, so without a gateway they are added through lo0. A loopback
+    // gateway binds the route to lo0 by itself.
     #[cfg(target_os = "macos")]
-    let if_index = if _rtm_type == RTM_ADD as u8 && value.kind != RouteKind::Unicast {
+    let if_index = if _rtm_type == RTM_ADD as u8
+        && value.kind != RouteKind::Unicast
+        && value.gateway.is_none()
+    {
         Some(crate::if_name_to_index("lo0")?)
     } else {
         if_index
@@ -320,7 +323,7 @@ fn route_to_m_rtmsg(_rtm_type: u8, value: &Route) -> io::Result<m_rtmsg> {
     // to that interface, where nothing refuses the traffic. Naming lo0's
     // address (RTA_IFA, like `route add -ifa`) binds it to lo0 again.
     #[cfg(target_os = "macos")]
-    if _rtm_type == RTM_ADD as u8 && value.kind != RouteKind::Unicast {
+    if _rtm_type == RTM_ADD as u8 && value.kind != RouteKind::Unicast && value.gateway.is_none() {
         let lo0_addr = match value.destination {
             IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
             IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
@@ -631,12 +634,6 @@ fn message_to_route(hdr: &rt_msghdr, msg: &[u8]) -> Option<Route> {
     } else {
         RouteKind::Unicast
     };
-    // A reject or blackhole route forwards nothing, so its gateway is no next
-    // hop; dropping it lets the listed route pass check() and be deleted
-    #[cfg(target_os = "macos")]
-    if kind != RouteKind::Unicast {
-        gateway = None;
-    }
 
     Some(Route {
         destination,
@@ -955,13 +952,62 @@ mod tests {
     }
 
     #[test]
-    fn check_rejects_gateway_on_non_unicast() {
+    fn check_accepts_gateway_on_non_unicast() {
         for (kind, _) in REJECT_KINDS {
-            for (route, gateway) in [(v4_route(), "127.0.0.1"), (v6_route(), "::1")] {
-                let route = route.with_kind(kind).with_gateway(gateway.parse().unwrap());
-                let err = route.check().unwrap_err();
-                assert_eq!(err.to_string(), "only unicast routes can have a gateway");
-                assert!(add_or_del_route_req(&route, RTM_ADD as u8).is_err());
+            for (route, gateway, other_family) in [
+                (v4_route(), "127.0.0.1", "::1"),
+                (v6_route(), "::1", "127.0.0.1"),
+            ] {
+                let route = route.with_kind(kind);
+                let with_gateway = route.clone().with_gateway(gateway.parse().unwrap());
+                with_gateway.check().unwrap();
+                add_or_del_route_req(&with_gateway, RTM_ADD as u8).unwrap();
+
+                let mismatched = route.with_gateway(other_family.parse().unwrap());
+                let err = mismatched.check().unwrap_err();
+                assert_eq!(err.to_string(), "gateway error");
+            }
+        }
+    }
+
+    /// With a gateway, a non-unicast route is added like a unicast gateway
+    /// route plus the kind flag, as by `route add <net> ::1 -reject`.
+    #[test]
+    fn non_unicast_gateway_add_is_a_gateway_route() {
+        for (kind, flag) in REJECT_KINDS {
+            for (route, gateway, mask) in [
+                (v4_route(), "127.0.0.1", "255.255.255.0"),
+                (v6_route(), "::1", "8000::"),
+            ] {
+                let route = route.with_gateway(gateway.parse().unwrap());
+                for unicast in [route.clone(), route.with_if_index(other_if_index())] {
+                    let route = unicast.clone().with_kind(kind);
+                    let msg = req(&route, RTM_ADD);
+                    assert_eq!(
+                        msg.hdr.rtm_flags as u32,
+                        RTF_STATIC | RTF_UP | RTF_GATEWAY | flag,
+                        "{route}"
+                    );
+                    assert_eq!(
+                        msg.hdr.rtm_addrs as u32,
+                        RTA_DST | RTA_GATEWAY | RTA_NETMASK,
+                        "{route}"
+                    );
+                    assert_eq!(
+                        addrs(&msg),
+                        vec![Addr::Ip(route.destination), ip(gateway), ip(mask)],
+                        "{route}"
+                    );
+                    assert_eq!(msg.hdr.rtm_index, 0, "{route}");
+                    // Byte for byte the unicast message, but for the flag
+                    let unicast = req(&unicast, RTM_ADD);
+                    assert_eq!(msg.slice().len(), unicast.slice().len(), "{route}");
+                    assert_eq!(
+                        msg.slice()[mem::size_of::<rt_msghdr>()..],
+                        unicast.slice()[mem::size_of::<rt_msghdr>()..],
+                        "{route}"
+                    );
+                }
             }
         }
     }
@@ -973,10 +1019,12 @@ mod tests {
                 .with_kind(kind)
                 .with_if_name("lo0".to_string())
                 .with_if_scope(true);
-            let Err(err) = add_or_del_route_req(&route, RTM_ADD as u8) else {
-                panic!("{kind:?} route added with if_scope");
-            };
-            assert_eq!(err.to_string(), "only unicast routes can use if_scope");
+            for route in [route.clone(), route.with_gateway("::1".parse().unwrap())] {
+                let Err(err) = add_or_del_route_req(&route, RTM_ADD as u8) else {
+                    panic!("{route} added with if_scope");
+                };
+                assert_eq!(err.to_string(), "only unicast routes can use if_scope");
+            }
         }
     }
 
@@ -1008,7 +1056,7 @@ mod tests {
             for gateway in [None, Some("127.0.0.1")] {
                 let route = parse(RTF_UP | RTF_STATIC | flag, gateway);
                 assert_eq!(route.kind(), kind, "{flag:#x} {gateway:?}");
-                assert_eq!(route.gateway(), None);
+                assert_eq!(route.gateway(), gateway.map(|gw| gw.parse().unwrap()));
                 assert_eq!(route.if_index(), Some(lo0_index()));
             }
         }
@@ -1025,13 +1073,17 @@ mod tests {
     fn listed_route_can_be_deleted() {
         for (kind, flag) in REJECT_KINDS {
             let listed = parse(RTF_UP | RTF_STATIC | RTF_GATEWAY | flag, Some("127.0.0.1"));
+            listed.check().unwrap();
             let msg = req(&listed, RTM_DELETE);
             assert_eq!(
                 msg.hdr.rtm_flags as u32,
-                RTF_STATIC | RTF_UP | flag,
+                RTF_STATIC | RTF_UP | RTF_GATEWAY | flag,
                 "{kind:?}"
             );
-            assert_eq!(addrs(&msg), vec![ip("198.51.100.0"), ip("255.255.255.0")]);
+            assert_eq!(
+                addrs(&msg),
+                vec![ip("198.51.100.0"), ip("127.0.0.1"), ip("255.255.255.0")]
+            );
         }
     }
 
@@ -1043,8 +1095,15 @@ mod tests {
             "Route { destination: ::/1, gateway: None, if_index: None, if_name: None }"
         );
         assert_eq!(
-            route.with_kind(RouteKind::Blackhole).to_string(),
+            route.clone().with_kind(RouteKind::Blackhole).to_string(),
             "Route { destination: ::/1, gateway: None, if_index: None, if_name: None, kind: Blackhole }"
+        );
+        assert_eq!(
+            route
+                .with_kind(RouteKind::Unreachable)
+                .with_gateway("::1".parse().unwrap())
+                .to_string(),
+            "Route { destination: ::/1, gateway: ::1, if_index: None, if_name: None, kind: Unreachable }"
         );
     }
 }
