@@ -11,8 +11,9 @@ pub enum RouteChange {
 
 /// (Linux and macOS) The kind of a route. Only unicast routes forward
 /// traffic; the others refuse it. On Linux the kind is the route type
-/// (`rtm_type`). On macOS it is a route flag, which the kernel enforces only on
-/// routes through `lo0`, so this crate adds such routes through `lo0`.
+/// (`rtm_type`). On macOS it is a route flag. Without a gateway this crate adds
+/// the route through `lo0`, whose driver refuses the traffic; with a loopback
+/// gateway (`::1`, `127.0.0.1`) the kernel binds it to `lo0` itself.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -171,14 +172,19 @@ impl Route {
         self
     }
     /// (Linux and macOS) Sets the route kind. Defaults to [`RouteKind::Unicast`].
-    /// Non-unicast routes refuse traffic and take no next hop: a gateway is
-    /// rejected by [`check`](Self::check), and an interface is ignored.
+    /// Non-unicast routes refuse traffic, and an interface is ignored.
     ///
-    /// On macOS the route is added through `lo0`, whose driver refuses the
-    /// traffic, and adding it with `if_scope` fails. Deleting a route matches
+    /// On macOS a gateway is allowed. It should be a loopback address (`::1`,
+    /// `127.0.0.1`), which binds the route to `lo0`, whose driver refuses the
+    /// traffic; without a gateway the route is added through `lo0`. The two
+    /// forms differ for interface-scoped lookups (link-local destinations,
+    /// sockets bound to an interface): a route through `lo0` without a gateway
+    /// also catches them, a gateway route leaves them to the interface's own
+    /// routes. Adding the route with `if_scope` fails. Deleting a route matches
     /// only its destination prefix (and `if_scope`), whatever its kind.
     ///
-    /// On Linux the kernel ignores the kind when deleting an IPv6 route, so
+    /// On Linux a gateway is rejected by [`check`](Self::check). The kernel
+    /// ignores the kind when deleting an IPv6 route, so
     /// [`RouteManager::delete`](crate::RouteManager::delete) can remove another
     /// route to the same prefix, such as a unicast route with a lower metric.
     /// To delete exactly a route added this way, give it a nonzero metric with
@@ -261,7 +267,7 @@ impl Route {
                 "if_scope requires an interface (if_index or if_name)",
             ));
         }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(target_os = "linux")]
         if self.kind != RouteKind::Unicast && self.gateway.is_some() {
             return Err(io::Error::other("only unicast routes can have a gateway"));
         }
