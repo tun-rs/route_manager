@@ -14,9 +14,7 @@ impl<T: AsRawFd> AsyncRoute<T> {
         }
         // SAFETY: `fd` is owned by `AsyncFd` for its whole lifetime, so the descriptor stays open.
         let fd = unsafe { AsyncFd::register(fd) }.map_err(io::Error::from)?;
-        Ok(AsyncRoute {
-            fd,
-        })
+        Ok(AsyncRoute { fd })
     }
     pub async fn read_with<R>(
         &mut self,
