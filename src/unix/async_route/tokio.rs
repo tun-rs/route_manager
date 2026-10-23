@@ -12,9 +12,9 @@ impl<T: AsRawFd> AsyncRoute<T> {
         if unsafe { libc::ioctl(fd.as_raw_fd(), libc::FIONBIO, &mut nonblocking) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(AsyncRoute {
-            fd: AsyncFd::new(fd)?,
-        })
+        // SAFETY: `fd` is owned by `AsyncFd` for its whole lifetime, so the descriptor stays open.
+        let fd = unsafe { AsyncFd::register(fd) }.map_err(io::Error::from)?;
+        Ok(AsyncRoute { fd })
     }
     pub async fn read_with<R>(
         &mut self,
