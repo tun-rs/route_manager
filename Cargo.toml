@@ -22,7 +22,7 @@ tokio = { version = "1.54", features = [
 async-io = { version = "2.3", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-netlink-packet-route = "0.33"
+netlink-packet-route = "0.34"
 netlink-sys = "0.9"
 netlink-packet-core = "0.9"
 
