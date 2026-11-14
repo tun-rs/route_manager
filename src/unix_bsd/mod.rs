@@ -131,25 +131,24 @@ impl RouteManager {
 }
 
 fn try_get_msg_buf() -> io::Result<Vec<u8>> {
-    const MAX_RETRYS: usize = 3;
-
-    for _ in 0..MAX_RETRYS {
+    // see: https://github.com/golang/net/blob/ec05fdcd71141c885f3fb84c41d1c692f094ccbe/route/route.go#L126
+    dump_with(|buf| {
         let mut mib: [u32; 6] = [0; 6];
-        let mut len = 0;
-
         mib[0] = CTL_NET;
         mib[1] = AF_ROUTE;
         mib[2] = 0;
         mib[3] = 0; // family: ipv4 & ipv6
         mib[4] = NET_RT_DUMP;
         // mib[5] flags: 0
-
-        // see: https://github.com/golang/net/blob/ec05fdcd71141c885f3fb84c41d1c692f094ccbe/route/route.go#L126
+        let (ptr, mut len) = match buf {
+            Some(buf) => (buf.as_mut_ptr(), buf.len()),
+            None => (std::ptr::null_mut(), 0),
+        };
         if unsafe {
             sysctl(
                 &mut mib as *mut _ as *mut _,
                 6,
-                std::ptr::null_mut(),
+                ptr as _,
                 &mut len,
                 std::ptr::null_mut(),
                 0,
@@ -158,28 +157,52 @@ fn try_get_msg_buf() -> io::Result<Vec<u8>> {
         {
             return Err(io::Error::last_os_error());
         }
+        Ok(len)
+    })
+}
 
-        let mut msgs_buf: Vec<u8> = vec![0; len];
+/// One dump of the routing table through `call`, the two-step `sysctl`:
+/// `call(None)` answers how many bytes the dump needs, and `call(Some(buf))`
+/// writes the dump into `buf` and answers how many bytes it wrote.
+///
+/// The table can change between the two steps:
+///
+/// - When it shrank, the second step writes less than the first asked for,
+///   and only what it wrote is kept: the rest of the buffer is zeros, which
+///   no routing message parses as.
+/// - When it grew, a kernel either fails the second step with `ENOMEM`
+///   (macOS) or answers success with the last message cut short where the
+///   buffer ended (FreeBSD: its route dump drops the copy's `ENOMEM`). The
+///   buffer is given room to grow, so a dump that fills it to the last byte
+///   is one that may have been cut, and like `ENOMEM` it starts the dump
+///   over, a few times before `ENOMEM` stands.
+///
+/// Any other error is returned at once.
+fn dump_with(mut call: impl FnMut(Option<&mut [u8]>) -> io::Result<usize>) -> io::Result<Vec<u8>> {
+    const MAX_TRIES: usize = 3;
 
-        if unsafe {
-            sysctl(
-                &mut mib as *mut _ as *mut _,
-                6,
-                msgs_buf.as_mut_ptr() as _,
-                &mut len,
-                std::ptr::null_mut(),
-                0,
-            )
-        } < 0
-        {
-            // will retry return error if
-            continue;
-        } else {
-            return Ok(msgs_buf);
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        let needed = call(None)?;
+        if needed == 0 {
+            return Ok(Vec::new());
+        }
+        let room = needed + needed / 4 + 1024;
+        let mut msgs_buf: Vec<u8> = vec![0; room];
+        let outgrown = match call(Some(&mut msgs_buf)) {
+            Ok(written) if written < room => {
+                msgs_buf.truncate(written);
+                return Ok(msgs_buf);
+            }
+            Ok(_) => io::Error::from_raw_os_error(libc::ENOMEM),
+            Err(e) if e.raw_os_error() == Some(libc::ENOMEM) => e,
+            Err(e) => return Err(e),
+        };
+        if tries == MAX_TRIES {
+            return Err(outgrown);
         }
     }
-
-    Err(io::Error::other("Failed to get routing table"))
 }
 
 fn list_routes() -> io::Result<Vec<Route>> {
@@ -1171,5 +1194,206 @@ mod notification_regression_tests {
             let error = deserialize_res_change(|_| {}, &bytes).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         }
+    }
+}
+
+/// The table dump, on every target this module serves.
+#[cfg(test)]
+mod dump_tests {
+    use super::*;
+
+    /// A route message with a header and no addresses.
+    fn header_only_get() -> Vec<u8> {
+        let mut bytes = vec![0; std::mem::size_of::<rt_msghdr>()];
+        let len = bytes.len() as u16;
+        bytes[..2].copy_from_slice(&len.to_ne_bytes());
+        bytes[2] = RTM_VERSION as u8;
+        bytes[3] = RTM_GET as u8;
+        bytes
+    }
+
+    /// A stand-in for the two-step `sysctl`: each round answers `needed[i]`
+    /// bytes, then fails with `fails[i]`, or fills the whole buffer as a
+    /// kernel does when the table outgrew it (`cut[i]`), or writes `dump`.
+    #[derive(Default)]
+    struct FakeDump {
+        needed: Vec<usize>,
+        fails: Vec<Option<i32>>,
+        cut: Vec<bool>,
+        dump: Vec<u8>,
+        sized: usize,
+        filled: usize,
+    }
+
+    impl FakeDump {
+        fn call(&mut self, buf: Option<&mut [u8]>) -> io::Result<usize> {
+            match buf {
+                None => {
+                    self.sized += 1;
+                    Ok(self.needed[self.sized - 1])
+                }
+                Some(buf) => {
+                    self.filled += 1;
+                    let round = self.filled - 1;
+                    if let Some(errno) = self.fails.get(round).copied().flatten() {
+                        return Err(io::Error::from_raw_os_error(errno));
+                    }
+                    if self.cut.get(round).copied().unwrap_or(false) {
+                        buf.fill(0xee);
+                        return Ok(buf.len());
+                    }
+                    buf[..self.dump.len()].copy_from_slice(&self.dump);
+                    Ok(self.dump.len())
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_dump_that_filled_its_buffer_is_taken_again() {
+        let message = header_only_get();
+        let mut fake = FakeDump {
+            needed: vec![message.len(); 2],
+            cut: vec![true, false],
+            dump: message.clone(),
+            ..Default::default()
+        };
+        let buf = dump_with(|b| fake.call(b)).unwrap();
+        assert_eq!(buf, message, "the second, complete dump");
+        assert_eq!((fake.sized, fake.filled), (2, 2));
+    }
+
+    #[test]
+    fn a_dump_that_keeps_filling_its_buffer_fails_with_enomem() {
+        let mut fake = FakeDump {
+            needed: vec![8; 3],
+            cut: vec![true; 3],
+            ..Default::default()
+        };
+        let error = dump_with(|b| fake.call(b)).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ENOMEM));
+        assert_eq!(fake.filled, 3, "three tries, then the error stands");
+    }
+
+    #[test]
+    fn a_dump_of_a_table_that_shrank_keeps_only_what_was_written() {
+        // The table shrank by 64 bytes between the two steps.
+        let message = header_only_get();
+        let mut fake = FakeDump {
+            needed: vec![message.len() + 64],
+            fails: vec![None],
+            dump: message.clone(),
+            ..Default::default()
+        };
+        let buf = dump_with(|b| fake.call(b)).unwrap();
+        assert_eq!(buf, message, "only the bytes the second step wrote");
+        deserialize_res(|_, _| {}, &buf).expect("the dump parses");
+
+        // The buffer as the first step sized it ends in zeros, which do not.
+        let mut unshortened = message.clone();
+        unshortened.resize(message.len() + 64, 0);
+        let error = deserialize_res(|_, _| {}, &unshortened).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_dump_of_a_table_that_grew_is_sized_again() {
+        let message = header_only_get();
+        let mut fake = FakeDump {
+            needed: vec![message.len() - 8, message.len()],
+            fails: vec![Some(libc::ENOMEM), None],
+            dump: message.clone(),
+            ..Default::default()
+        };
+        let buf = dump_with(|b| fake.call(b)).unwrap();
+        assert_eq!(buf, message);
+        assert_eq!((fake.sized, fake.filled), (2, 2));
+    }
+
+    #[test]
+    fn a_dump_of_a_table_that_keeps_growing_fails_with_enomem() {
+        let mut fake = FakeDump {
+            needed: vec![8; 3],
+            fails: vec![Some(libc::ENOMEM); 3],
+            dump: Vec::new(),
+            ..Default::default()
+        };
+        let error = dump_with(|b| fake.call(b)).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ENOMEM));
+        assert_eq!(fake.filled, 3, "three tries, then the error stands");
+    }
+
+    #[test]
+    fn another_dump_error_is_returned_at_once() {
+        let mut fake = FakeDump {
+            needed: vec![8],
+            fails: vec![Some(libc::EPERM)],
+            dump: Vec::new(),
+            ..Default::default()
+        };
+        let error = dump_with(|b| fake.call(b)).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+        assert_eq!(fake.filled, 1);
+    }
+
+    #[test]
+    fn an_empty_table_is_an_empty_dump() {
+        let mut fake = FakeDump {
+            needed: vec![0],
+            fails: Vec::new(),
+            dump: Vec::new(),
+            ..Default::default()
+        };
+        assert!(dump_with(|b| fake.call(b)).unwrap().is_empty());
+        assert_eq!(fake.filled, 0, "nothing to fill");
+    }
+
+    /// The race on a real table, which needs the privilege to change it: one
+    /// thread adds and deletes a host route while the table is listed. Run
+    /// as root with `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn listing_beside_a_route_added_and_deleted_never_fails() {
+        use std::net::{IpAddr, Ipv4Addr};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let mut manager = RouteManager::new().unwrap();
+        let gateway = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .find_map(|r| match r.gateway() {
+                Some(IpAddr::V4(gw)) if r.prefix() == 0 && !gw.is_unspecified() => Some(gw),
+                _ => None,
+            })
+            .expect("an IPv4 default route with a gateway");
+        let probe = Route::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 79)), 32)
+            .with_gateway(IpAddr::V4(gateway));
+        let stop = Arc::new(AtomicBool::new(false));
+        let churn = {
+            let (stop, probe) = (stop.clone(), probe.clone());
+            std::thread::spawn(move || {
+                let mut churner = RouteManager::new().unwrap();
+                let mut rounds = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    churner.add(&probe).unwrap();
+                    churner.delete(&probe).unwrap();
+                    rounds += 1;
+                }
+                rounds
+            })
+        };
+        let mut failures = 0;
+        for _ in 0..4_000 {
+            if let Err(e) = manager.list() {
+                eprintln!("list: {e}");
+                failures += 1;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let rounds = churn.join().unwrap();
+        eprintln!("4000 lists beside {rounds} adds and deletes: {failures} failed");
+        assert_eq!(failures, 0);
     }
 }
