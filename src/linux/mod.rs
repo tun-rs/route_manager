@@ -99,6 +99,12 @@ pub struct RouteManager {
     _private: std::marker::PhantomData<()>,
 }
 
+/// The receive buffer for one batch of a route dump. The kernel makes a batch
+/// at least `NLMSG_GOODSIZE` long, about 8 KiB on 16 KiB and 64 KiB pages, and
+/// otherwise as long as the reader's buffer, up to about 32 KiB. So every batch
+/// fits in this buffer, and a longer one is refused rather than parsed cut.
+pub(crate) const DUMP_BUF_LEN: usize = 65_536;
+
 pub(crate) struct RouteSocket(Socket);
 impl AsRawFd for RouteSocket {
     fn as_raw_fd(&self) -> RawFd {
@@ -120,6 +126,11 @@ impl RouteSocket {
     pub(crate) fn recv(&self, mut buf: &mut [u8]) -> io::Result<usize> {
         self.0.recv(&mut buf, 0)
     }
+    /// Receives one batch of a dump and returns the batch's full length, which
+    /// is more than `buf.len()` when the batch did not fit and was cut.
+    pub(crate) fn recv_dump(&self, mut buf: &mut [u8]) -> io::Result<usize> {
+        self.0.recv(&mut buf, libc::MSG_TRUNC)
+    }
     pub(crate) fn add_membership(&mut self) -> io::Result<()> {
         self.0.add_membership(libc::RTNLGRP_IPV4_ROUTE)?;
         self.0.add_membership(libc::RTNLGRP_IPV6_ROUTE)?;
@@ -139,44 +150,23 @@ impl RouteManager {
         RouteListener::new()
     }
 
-    /// Lists routes for a specific address family.
-    fn list_family(socket: &RouteSocket, family: AddressFamily) -> io::Result<Vec<RouteChange>> {
-        let mut buf = vec![0; 4096];
+    /// Lists all current routes.
+    ///
+    /// One dump with no family: the kernel answers it with the routes of every
+    /// family in one stream. A dump per family let a failed IPv4 dump spoil
+    /// the IPv6 dump on the same socket, and a kernel without IPv6 answers an
+    /// IPv6 dump with the IPv4 routes.
+    pub fn list(&mut self) -> io::Result<Vec<Route>> {
+        let socket = RouteSocket::new()?;
+        socket.send(&list_route_req(AddressFamily::Unspec))?;
+        let mut buf = vec![0; DUMP_BUF_LEN];
         let mut list = Vec::new();
-        let req = list_route_req(family);
-        socket.send(&req)?;
         loop {
-            let len = socket.recv(&mut buf)?;
-            let rs = deserialize_res(
-                |route| {
-                    list.push(route);
-                },
-                &buf[..len],
-            )?;
-            if rs {
+            let received = socket.recv_dump(&mut buf)?;
+            if dump_batch(&mut list, &buf, received)? {
                 break;
             }
         }
-        Ok(list)
-    }
-
-    /// Lists all current routes.
-    pub fn list(&mut self) -> io::Result<Vec<Route>> {
-        let socket = RouteSocket::new()?;
-
-        // Query IPv4 routes
-        let v4_result = Self::list_family(&socket, AddressFamily::Inet);
-
-        // Query IPv6 routes
-        let v6_result = Self::list_family(&socket, AddressFamily::Inet6);
-
-        // Only fail if both queries failed. If at least one succeeded, return partial results.
-        let list = match (v4_result, v6_result) {
-            (Ok(v4), Ok(v6)) => [v4, v6].concat(),
-            (Ok(v4), Err(_)) => v4,            // IPv4 succeeded
-            (Err(_), Ok(v6)) => v6,            // IPv6 succeeded
-            (Err(e), Err(_)) => return Err(e), // Both failed, return first error
-        };
         Ok(convert_add_route(list))
     }
     /// Adds a new route.
@@ -216,6 +206,36 @@ pub(crate) fn convert_add_route(list: Vec<RouteChange>) -> Vec<Route> {
         .collect()
 }
 
+/// Takes one batch of a route dump into `list`. `received` is the batch's full
+/// length as the receive reported it: a batch longer than `buf` was cut, and
+/// is refused before any of it is parsed. Returns whether the dump has ended.
+pub(crate) fn dump_batch(
+    list: &mut Vec<RouteChange>,
+    buf: &[u8],
+    received: usize,
+) -> io::Result<bool> {
+    if received > buf.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "a route dump batch of {received} bytes did not fit the {}-byte buffer",
+                buf.len()
+            ),
+        ));
+    }
+    deserialize_res(|route| list.push(route), &buf[..received])
+}
+
+/// Whether a route message is an IPv4 or IPv6 route. A dump with no family
+/// also carries other families' routes, multicast routing and MPLS among
+/// them, which a `Route` cannot describe.
+fn is_ip_route(msg: &RouteMessage) -> bool {
+    matches!(
+        msg.header.address_family,
+        AddressFamily::Inet | AddressFamily::Inet6
+    )
+}
+
 pub(crate) fn deserialize_res<F: FnMut(RouteChange)>(
     mut add_fn: F,
     receive_buffer: &[u8],
@@ -239,8 +259,12 @@ pub(crate) fn deserialize_res<F: FnMut(RouteChange)>(
             NetlinkPayload::Noop => {}
             NetlinkPayload::Overrun(_) => {}
             NetlinkPayload::InnerMessage(msg) => match msg {
-                RouteNetlinkMessage::NewRoute(msg) => add_fn(RouteChange::Add(msg.try_into()?)),
-                RouteNetlinkMessage::DelRoute(msg) => add_fn(RouteChange::Delete(msg.try_into()?)),
+                RouteNetlinkMessage::NewRoute(msg) if is_ip_route(&msg) => {
+                    add_fn(RouteChange::Add(msg.try_into()?))
+                }
+                RouteNetlinkMessage::DelRoute(msg) if is_ip_route(&msg) => {
+                    add_fn(RouteChange::Delete(msg.try_into()?))
+                }
                 _ => {}
             },
             _ => {}
@@ -667,5 +691,95 @@ mod tests {
             "Route { destination: ::/1, gateway: None, if_index: None, if_name: None, \
              metric: None, table: 0, source: None, kind: Unreachable, pref_source: None }"
         );
+    }
+
+    /// The bytes of one dump batch holding these messages, each as the kernel
+    /// writes it.
+    fn batch(payloads: Vec<NetlinkPayload<RouteNetlinkMessage>>) -> Vec<u8> {
+        let mut out = Vec::new();
+        for payload in payloads {
+            let mut packet = NetlinkMessage::new(NetlinkHeader::default(), payload);
+            packet.finalize();
+            let mut buf = vec![0; packet.header.length as usize];
+            packet.serialize(&mut buf[..]);
+            out.extend_from_slice(&buf);
+        }
+        out
+    }
+
+    fn new_route(
+        family: AddressFamily,
+        destination: Option<IpAddr>,
+        prefix: u8,
+    ) -> NetlinkPayload<RouteNetlinkMessage> {
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = family;
+        msg.header.destination_prefix_length = prefix;
+        if let Some(destination) = destination {
+            msg.attributes
+                .push(RouteAttribute::Destination(destination.into()));
+        }
+        NetlinkPayload::from(RouteNetlinkMessage::NewRoute(msg))
+    }
+
+    fn done() -> NetlinkPayload<RouteNetlinkMessage> {
+        NetlinkPayload::Done(netlink_packet_core::DoneMessage::default())
+    }
+
+    #[test]
+    fn a_batch_longer_than_the_buffer_is_refused() {
+        let bytes = batch(vec![
+            new_route(
+                AddressFamily::Inet,
+                Some("198.51.100.0".parse().unwrap()),
+                24,
+            ),
+            done(),
+        ]);
+        let mut list = Vec::new();
+        let error = dump_batch(&mut list, &bytes, bytes.len() + 1).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(list.is_empty(), "nothing of a cut batch is taken");
+    }
+
+    #[test]
+    fn a_dump_keeps_the_ip_routes_and_skips_other_families() {
+        let bytes = batch(vec![
+            new_route(
+                AddressFamily::Inet,
+                Some("198.51.100.0".parse().unwrap()),
+                24,
+            ),
+            new_route(AddressFamily::Mpls, None, 0),
+            new_route(
+                AddressFamily::Inet6,
+                Some("2001:db8::".parse().unwrap()),
+                32,
+            ),
+            done(),
+        ]);
+        let mut list = Vec::new();
+        assert!(
+            dump_batch(&mut list, &bytes, bytes.len()).unwrap(),
+            "the dump ended"
+        );
+        let routes = convert_add_route(list);
+        let destinations: Vec<String> = routes
+            .iter()
+            .map(|r| format!("{}/{}", r.destination, r.prefix))
+            .collect();
+        assert_eq!(destinations, ["198.51.100.0/24", "2001:db8::/32"]);
+    }
+
+    #[test]
+    fn a_batch_without_the_end_of_the_dump_asks_for_more() {
+        let bytes = batch(vec![new_route(
+            AddressFamily::Inet,
+            Some("198.51.100.0".parse().unwrap()),
+            24,
+        )]);
+        let mut list = Vec::new();
+        assert!(!dump_batch(&mut list, &bytes, bytes.len()).unwrap());
+        assert_eq!(list.len(), 1);
     }
 }
