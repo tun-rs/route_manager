@@ -450,7 +450,9 @@ fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::
         if buf[2] as u32 != RTM_VERSION {
             continue;
         }
-        #[cfg(target_os = "macos")]
+        // The routing socket also carries interface and address messages,
+        // each with its own and shorter header, so the type decides before
+        // the route header's length is checked.
         if !matches!(buf[3] as u32, RTM_ADD | RTM_DELETE | RTM_CHANGE | RTM_GET) {
             continue;
         }
@@ -475,12 +477,6 @@ fn deserialize_res<F: FnMut(u32, Route)>(mut add_fn: F, msgs_buf: &[u8]) -> io::
         #[cfg(target_os = "netbsd")]
         if (rt_hdr.rtm_flags as u32 & (RTF_GATEWAY | RTF_STATIC)) == 0 {
             continue;
-        }
-
-        // Other message types (e.g. RTM_IFINFO) have a different header layout
-        match rt_hdr.rtm_type as u32 {
-            RTM_ADD | RTM_DELETE | RTM_CHANGE | RTM_GET => {}
-            _ => continue,
         }
 
         if rt_hdr.rtm_errno != 0 {
@@ -749,6 +745,67 @@ fn create_route_socket() -> io::Result<UnixStream> {
     }
     let route_fd = unsafe { UnixStream::from_raw_fd(fd) };
     Ok(route_fd)
+}
+
+#[cfg(test)]
+mod route_socket_tests {
+    use super::*;
+
+    /// A routing-socket message of another kind, with only the length,
+    /// version and type every routing message starts with.
+    fn other_message(len: usize, rtm_type: u32) -> Vec<u8> {
+        let mut bytes = vec![0; len];
+        bytes[..2].copy_from_slice(&(len as u16).to_ne_bytes());
+        bytes[2] = RTM_VERSION as u8;
+        bytes[3] = rtm_type as u8;
+        bytes
+    }
+
+    /// A whole route add message, as the kernel echoes one to listeners.
+    fn route_add() -> Vec<u8> {
+        let route = Route::new("198.51.100.0".parse().unwrap(), 24)
+            .with_gateway("192.0.2.1".parse().unwrap());
+        add_or_del_route_req(&route, RTM_ADD as u8)
+            .unwrap()
+            .slice()
+            .to_vec()
+    }
+
+    /// The routes the listener's decoder reports as added.
+    fn added(bytes: &[u8]) -> io::Result<Vec<String>> {
+        let mut added = Vec::new();
+        deserialize_res_change(
+            |change| {
+                if let RouteChange::Add(route) = change {
+                    added.push(format!("{}/{}", route.destination(), route.prefix()));
+                }
+            },
+            bytes,
+        )?;
+        Ok(added)
+    }
+
+    #[test]
+    fn an_address_message_is_skipped() {
+        let mut bytes = other_message(20, RTM_NEWADDR);
+        bytes.extend(route_add());
+        assert_eq!(added(&bytes).unwrap(), ["198.51.100.0/24"]);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn an_interface_announcement_is_skipped() {
+        let mut bytes = other_message(24, RTM_IFANNOUNCE);
+        bytes.extend(route_add());
+        assert_eq!(added(&bytes).unwrap(), ["198.51.100.0/24"]);
+    }
+
+    #[test]
+    fn a_route_message_shorter_than_its_header_still_fails() {
+        let error = added(&other_message(20, RTM_ADD)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "truncated route header");
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
