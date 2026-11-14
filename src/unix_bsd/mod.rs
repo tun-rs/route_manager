@@ -176,6 +176,9 @@ fn try_get_msg_buf() -> io::Result<Vec<u8>> {
 ///   buffer is given room to grow, so a dump that fills it to the last byte
 ///   is one that may have been cut, and like `ENOMEM` it starts the dump
 ///   over, a few times before `ENOMEM` stands.
+/// - When the second step writes nothing after the first asked for bytes, the
+///   dump is started over the same way: FreeBSD answers so when it cannot
+///   wire the buffer.
 ///
 /// Any other error is returned at once.
 fn dump_with(mut call: impl FnMut(Option<&mut [u8]>) -> io::Result<usize>) -> io::Result<Vec<u8>> {
@@ -191,6 +194,11 @@ fn dump_with(mut call: impl FnMut(Option<&mut [u8]>) -> io::Result<usize>) -> io
         let room = needed + needed / 4 + 1024;
         let mut msgs_buf: Vec<u8> = vec![0; room];
         let outgrown = match call(Some(&mut msgs_buf)) {
+            // Nothing written after a size that needed bytes is not an empty
+            // table: FreeBSD answers so when it cannot wire the buffer
+            // (`vm.max_user_wired`), turning its own ENOMEM into success. A
+            // table that did empty answers the next size query with 0.
+            Ok(0) => io::Error::from_raw_os_error(libc::ENOMEM),
             Ok(written) if written < room => {
                 msgs_buf.truncate(written);
                 return Ok(msgs_buf);
@@ -1348,6 +1356,32 @@ mod dump_tests {
         assert_eq!(fake.filled, 0, "nothing to fill");
     }
 
+    #[test]
+    fn a_fill_that_wrote_nothing_is_taken_again() {
+        // The size query needed bytes, the fill wrote none, and the next size
+        // query finds the table empty.
+        let mut fake = FakeDump {
+            needed: vec![8, 0],
+            dump: Vec::new(),
+            ..Default::default()
+        };
+        assert!(dump_with(|b| fake.call(b)).unwrap().is_empty());
+        assert_eq!((fake.sized, fake.filled), (2, 1));
+    }
+
+    #[test]
+    fn a_dump_that_keeps_writing_nothing_fails_with_enomem() {
+        // FreeBSD's answer for a buffer it cannot wire.
+        let mut fake = FakeDump {
+            needed: vec![8; 3],
+            dump: Vec::new(),
+            ..Default::default()
+        };
+        let error = dump_with(|b| fake.call(b)).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ENOMEM));
+        assert_eq!(fake.filled, 3, "three tries, then the error stands");
+    }
+
     /// The race on a real table, which needs the privilege to change it: one
     /// thread adds and deletes a host route while the table is listed. Run
     /// as root with `cargo test -- --ignored`.
@@ -1356,7 +1390,7 @@ mod dump_tests {
     fn listing_beside_a_route_added_and_deleted_never_fails() {
         use std::net::{IpAddr, Ipv4Addr};
         use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
+        use std::sync::{Arc, Barrier};
 
         let mut manager = RouteManager::new().unwrap();
         let gateway = manager
@@ -1371,10 +1405,16 @@ mod dump_tests {
         let probe = Route::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 79)), 32)
             .with_gateway(IpAddr::V4(gateway));
         let stop = Arc::new(AtomicBool::new(false));
+        // The churner proves it can change the table, then both threads meet,
+        // so every listing below runs while the churn is under way.
+        let churning = Arc::new(Barrier::new(2));
         let churn = {
-            let (stop, probe) = (stop.clone(), probe.clone());
+            let (stop, churning, probe) = (stop.clone(), churning.clone(), probe.clone());
             std::thread::spawn(move || {
                 let mut churner = RouteManager::new().unwrap();
+                churner.add(&probe).unwrap();
+                churner.delete(&probe).unwrap();
+                churning.wait();
                 let mut rounds = 0u64;
                 while !stop.load(Ordering::Relaxed) {
                     churner.add(&probe).unwrap();
@@ -1384,6 +1424,7 @@ mod dump_tests {
                 rounds
             })
         };
+        churning.wait();
         let mut failures = 0;
         for _ in 0..4_000 {
             if let Err(e) = manager.list() {
@@ -1394,6 +1435,7 @@ mod dump_tests {
         stop.store(true, Ordering::Relaxed);
         let rounds = churn.join().unwrap();
         eprintln!("4000 lists beside {rounds} adds and deletes: {failures} failed");
+        assert!(rounds > 0, "the table changed while it was listed");
         assert_eq!(failures, 0);
     }
 }
