@@ -1,6 +1,6 @@
 use crate::linux::{
-    add_route_req, convert_add_route, delete_route_req, deserialize_res, list_route_req,
-    RouteSocket,
+    add_route_req, convert_add_route, delete_route_req, deserialize_res, dump_batch,
+    list_route_req, RouteSocket, DUMP_BUF_LEN,
 };
 use crate::AsyncRoute;
 use crate::{Route, RouteChange};
@@ -59,47 +59,20 @@ impl AsyncRouteManager {
         AsyncRouteListener::new()
     }
 
-    /// Asynchronously lists routes for a specific address family.
-    async fn list_family(
-        socket: &mut AsyncRoute<RouteSocket>,
-        family: AddressFamily,
-    ) -> io::Result<Vec<RouteChange>> {
-        let mut buf = vec![0; 4096];
-        let mut list = Vec::new();
-        let req = list_route_req(family);
+    /// Asynchronously lists all current routes, in one dump with no family,
+    /// as `RouteManager::list` does.
+    pub async fn list(&mut self) -> io::Result<Vec<Route>> {
+        let mut socket = AsyncRoute::new(RouteSocket::new()?)?;
+        let req = list_route_req(AddressFamily::Unspec);
         socket.write_with(|s| s.send(&req)).await?;
+        let mut buf = vec![0; DUMP_BUF_LEN];
+        let mut list = Vec::new();
         loop {
-            let len = socket.read_with(|s| s.recv(&mut buf)).await?;
-            let rs = deserialize_res(
-                |route| {
-                    list.push(route);
-                },
-                &buf[..len],
-            )?;
-            if rs {
+            let received = socket.read_with(|s| s.recv_dump(&mut buf)).await?;
+            if dump_batch(&mut list, &buf, received)? {
                 break;
             }
         }
-        Ok(list)
-    }
-
-    /// Asynchronously lists all current routes.
-    pub async fn list(&mut self) -> io::Result<Vec<Route>> {
-        let mut socket = AsyncRoute::new(RouteSocket::new()?)?;
-
-        // Query IPv4 routes
-        let v4_result = Self::list_family(&mut socket, AddressFamily::Inet).await;
-
-        // Query IPv6 routes
-        let v6_result = Self::list_family(&mut socket, AddressFamily::Inet6).await;
-
-        // Only fail if both queries failed. If at least one succeeded, return partial results.
-        let list = match (v4_result, v6_result) {
-            (Ok(v4), Ok(v6)) => [v4, v6].concat(),
-            (Ok(v4), Err(_)) => v4,            // IPv4 succeeded
-            (Err(_), Ok(v6)) => v6,            // IPv6 succeeded
-            (Err(e), Err(_)) => return Err(e), // Both failed, return first error
-        };
         Ok(convert_add_route(list))
     }
     /// Asynchronously adds a new route.
